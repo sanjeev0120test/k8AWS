@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and set your public IP before deploy.
+# Get your IP: (Invoke-RestMethod -Uri "https://checkip.amazonaws.com").Trim()
+
+aws_region           = "us-east-1"
+allowed_ingress_cidr = "YOUR.PUBLIC.IP.ADDRESS/32"
+allow_public_ingress = false
+enable_velero_bucket = true

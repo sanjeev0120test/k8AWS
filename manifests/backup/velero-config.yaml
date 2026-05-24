@@ -1,0 +1,26 @@
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: aws-default
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: PLACEHOLDER_BUCKET
+  config:
+    region: us-east-1
+  default: true
+
+---
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-app-backup
+  namespace: velero
+spec:
+  schedule: "0 3 * * *"
+  template:
+    includedNamespaces:
+      - app
+    storageLocation: aws-default
+    ttl: 720h

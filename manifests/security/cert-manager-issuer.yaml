@@ -1,0 +1,24 @@
+# Applied after cert-manager install via deploy.ps1
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app-selfsigned-tls
+  namespace: app
+spec:
+  secretName: app-selfsigned-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: k8aws.local
+  dnsNames:
+    - k8aws.local
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer

@@ -1,0 +1,19 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+terraform.tfvars
+*.tfvars
+
+# Secrets and credentials
+*.pem
+*.key
+kubeconfig
+*.log
+verify.log
+terraform/terraform.tfvars
+
+# OS
+.DS_Store
+Thumbs.db

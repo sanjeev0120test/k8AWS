@@ -1,0 +1,4 @@
+# metrics-server installed via deploy.ps1 from official release URL
+# Patch applied after install for kubeadm self-signed kubelet certs:
+# kubectl patch deployment metrics-server -n kube-system --type='json' \
+#   -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'

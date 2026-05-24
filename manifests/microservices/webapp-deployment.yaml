@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: app
+  labels:
+    app: webapp
+    app.kubernetes.io/name: webapp
+    app.kubernetes.io/part-of: k8aws-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: webapp
+        app.kubernetes.io/name: webapp
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+      containers:
+        - name: nginx
+          image: nginx:1.27.3-alpine3.20
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: html
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: html
+          configMap:
+            name: webapp-html
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webapp-html
+  namespace: app
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html><head><title>K8AWS Webapp</title></head>
+    <body><h1>K8AWS Webapp Microservice</h1>
+    <p>Nginx front-end — API talks to MongoDB.</p>
+    <p><a href="/api">Check API health</a></p></body></html>
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp
+  namespace: app
+  labels:
+    app: webapp
+spec:
+  type: ClusterIP
+  selector:
+    app: webapp
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: webapp
+  namespace: app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: webapp
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
