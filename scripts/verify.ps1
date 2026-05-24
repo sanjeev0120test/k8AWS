@@ -81,7 +81,9 @@ if ($instanceId) {
     $eso = Invoke-SsmQuiet $instanceId "kubectl get deployment external-secrets -n external-secrets --no-headers"
     Write-Check 13 "External Secrets Running" ($eso.Out -match "1/1")
     $esMongo = Invoke-SsmQuiet $instanceId "kubectl get externalsecret mongo-credentials -n app --no-headers"
-    Write-Check 14 "ExternalSecret mongo Ready" ($esMongo.Out -match "SecretSynced|Ready")
+    $esGrafana = Invoke-SsmQuiet $instanceId "kubectl get externalsecret grafana-admin-credentials -n observability --no-headers"
+    $esSynced = ($esMongo.Out -match "SecretSynced|Ready") -and ($esGrafana.Out -match "SecretSynced|Ready")
+    Write-Check 14 "ExternalSecrets synced (mongo + grafana)" $esSynced "mongo=$($esMongo.Out.Trim()) grafana=$($esGrafana.Out.Trim())"
     $pvc = Invoke-SsmQuiet $instanceId "kubectl get pvc -n app --no-headers"
     Write-Check 15 "Mongo PVC Bound" ($pvc.Out -match "Bound")
     $mongo = Invoke-SsmQuiet $instanceId "kubectl get statefulset mongo -n app --no-headers"
@@ -109,7 +111,9 @@ if ($instanceId) {
     $top = Invoke-SsmQuiet $instanceId "kubectl top nodes"
     Write-Check 27 "kubectl top nodes" ($top.Out -match "cpu")
     $velero = Invoke-SsmQuiet $instanceId "velero version 2>/dev/null | head -1"
-    Write-Check 28 "Velero installed" ($velero.Out -match "velero")
+    $bsl = Invoke-SsmQuiet $instanceId "velero backup-location get 2>/dev/null | grep Available || true"
+    $veleroOk = ($velero.Out -match "velero") -and ($bsl.Out -match "Available")
+    Write-Check 28 "Velero installed with available backup location" $veleroOk "bsl=$($bsl.Out.Trim())"
 } else {
     5..28 | ForEach-Object { Write-Check $_ "Skipped (no instance)" $false }
 }

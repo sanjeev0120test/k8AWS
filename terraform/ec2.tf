@@ -173,7 +173,7 @@ resource "aws_instance" "k8s_node" {
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
-    http_put_response_hop_limit = 2 # allows pods (ESO, Velero) to use instance profile via IMDS
+    http_put_response_hop_limit = 3 # pods (ESO, Velero) reach IMDSv2 for instance profile credentials
   }
 
   credit_specification {

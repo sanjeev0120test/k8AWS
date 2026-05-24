@@ -2,7 +2,7 @@
 
 **Small-org production patterns** on **1× m7i-flex.large** (8 GB RAM) in **us-east-1** — fully automated from Windows/Cursor, strict $0 guardrails (no NAT, no ALB, no SSH).
 
-**All documentation lives in this file.** Stack reference, diagrams, manual build steps, troubleshooting, and SRE review — nothing else required.
+**All documentation lives in this file.** Stack reference, diagrams, manual build steps, troubleshooting, and production architecture review — nothing else required.
 
 ---
 
@@ -45,7 +45,7 @@
 | [Configuration](#configuration) | terraform.tfvars variables |
 | [Troubleshooting](#troubleshooting) | Common failures |
 | [Project layout](#project-layout) | Folder tree |
-| [SRE structure review](#sre-production-structure-review) | Production expert assessment |
+| [Production structure review](#production-structure-review) | Architecture expert assessment |
 
 ---
 
@@ -123,7 +123,7 @@ Every technology below includes: **official definition**, **why we use it**, **t
 - **Definition:** 2 vCPU, 8 GiB RAM compute instance running Ubuntu 24.04 Noble.
 - **Real use case:** Host control plane + all workloads on one node for free-tier learning.
 - **Problem solved:** EKS control-plane cost avoided; enough RAM for observability + apps.
-- **Config:** 20 GiB gp3 encrypted root, IMDSv2 required, public IP, **no SSH (port 22)**, bootstrap via `user_data`.
+- **Config:** 20 GiB gp3 encrypted root, IMDSv2 required, **IMDS hop limit 3** (pods use instance profile), public IP, **no SSH (port 22)**, bootstrap via `user_data`.
 - **Files:** `terraform/ec2.tf`, `terraform/user-data/kubeadm-init.sh`
 
 #### SSM Session Manager + Run Command
@@ -353,7 +353,7 @@ kubectl apply -f https://raw.githubusercontent.com/external-secrets/external-sec
 
 ### Phase F — Secrets and namespaces (3 min)
 
-Apply via S3: `namespace/`, `policy/guardrails.yaml`, `secrets/external-secrets.yaml`, ESO creds secret. Wait for `mongo-credentials` and `grafana-admin-credentials` secrets.
+Apply via S3: `namespace/`, `policy/guardrails.yaml`, `secrets/external-secrets.yaml`. ESO uses the EC2 instance profile (no credentials secret). Wait for `mongo-credentials` and `grafana-admin-credentials` secrets.
 
 ### Phase G — Observability + NetworkPolicies (3 min)
 
@@ -373,7 +373,7 @@ kubectl apply -f networking/ingress-rules.yaml
 ### Phase I — Velero (2 min, optional)
 
 ```bash
-velero install --provider aws --bucket $BUCKET ...
+velero install --provider aws --bucket $BUCKET --no-secret --backup-location-config region=us-east-1 ...
 velero backup create app-manual-backup --include-namespaces app --wait
 ```
 
@@ -487,9 +487,9 @@ flowchart TB
             IGW["Internet Gateway"]
             EC2["EC2 m7i-flex.large<br/>kubeadm single-node"]
         end
-        SSM["SSM Parameter Store<br/>passwords + IAM keys"]
+        SSM["SSM Parameter Store<br/>passwords (KMS-encrypted)"]
         S3["S3 bucket<br/>manifests + Velero backups"]
-        IAM["IAM roles + users<br/>ESO / Velero / EC2"]
+        IAM["IAM instance role<br/>EC2 + ESO + Velero via IMDS"]
     end
 
     subgraph K8S["Kubernetes on EC2"]
@@ -578,8 +578,7 @@ flowchart TD
     I --> J[Install cert-manager]
     J --> K[Install nginx-ingress<br/>patch NodePort 30080]
     K --> L[Install External Secrets Operator]
-    L --> M[Apply ESO AWS creds secret]
-    M --> N[Apply namespaces + guardrails]
+    L --> N[Apply namespaces + guardrails]
     N --> O[Apply ExternalSecrets<br/>wait K8s secrets synced]
     O --> P[Prometheus + Grafana + Alertmanager]
     P --> Q[Apply NetworkPolicies<br/>before workloads]
@@ -647,7 +646,7 @@ flowchart LR
     ESO --> KS["Kubernetes Secrets<br/>mongo-credentials<br/>grafana-admin-credentials"]
     KS --> POD["App pods<br/>env / volumeMount"]
 
-    EC2["EC2 instance role<br/>IMDS hop limit 2"] --> ESO
+    EC2["EC2 instance role<br/>IMDS hop limit 3"] --> ESO
 ```
 
 | Step | Component | Why |
@@ -946,9 +945,9 @@ k8AWS/
 
 ---
 
-## SRE production structure review
+## Production structure review
 
-Expert assessment of this repository layout against production SRE standards.
+Expert assessment of this repository layout against production architecture standards.
 
 ### What is correct (production-aligned)
 
@@ -968,7 +967,7 @@ Expert assessment of this repository layout against production SRE standards.
 | **Cost guardrails** | ✅ Good | No NAT, no ALB, instance type/region locked in Terraform |
 | **Manifest delivery** | ✅ Good | S3 sync avoids SSM payload limits — production pattern |
 | **No static IAM access keys** | ✅ Good | ESO + Velero use EC2 instance profile (IMDS); keys removed |
-| **KMS encryption** | ✅ Good | Customer-managed KMS for SecureString params; rotation enabled |
+| **KMS encryption** | ✅ Good | Customer-managed KMS for SecureString params; rotation + explicit key policy |
 | **S3 TLS enforcement** | ✅ Good | Bucket policy denies insecure transport |
 
 ### Known gaps (acceptable for free-tier lab, fix for real production)
@@ -986,7 +985,7 @@ Expert assessment of this repository layout against production SRE standards.
 | Self-signed TLS only | Low | Add Route53 + Let's Encrypt ClusterIssuer when domain available |
 | 8 GiB RAM ceiling | High at scale | Full observability stack + apps may OOM under load testing |
 
-### Overall SRE score
+### Overall quality score
 
 | Lens | Score | Summary |
 |---|---|---|

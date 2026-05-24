@@ -41,4 +41,16 @@ if ($remaining) {
 }
 
 Write-Host "Cleanup verified — no running EC2 instances tagged Project=$ProjectName" -ForegroundColor Green
+
+# Best-effort removal of legacy static-key params from older lab versions
+$legacyParams = @(
+    "/$ProjectName/eso-access-key-id",
+    "/$ProjectName/eso-secret-access-key",
+    "/$ProjectName/velero-access-key-id",
+    "/$ProjectName/velero-secret-access-key"
+)
+foreach ($param in $legacyParams) {
+    aws ssm delete-parameter --name $param --region $Region 2>$null | Out-Null
+}
+
 Write-Host "Credits preserved. Safe to close lab.`n"

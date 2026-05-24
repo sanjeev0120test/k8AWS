@@ -173,7 +173,7 @@ Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/ingress-rules.
 Write-Step "Velero backup (optional — continues on failure)"
 try {
     Invoke-Ssm $instanceId "curl -fsSL https://github.com/vmware-tanzu/velero/releases/download/$VeleroVersion/velero-${VeleroVersion}-linux-amd64.tar.gz | tar -xz && install velero-${VeleroVersion}-linux-amd64/velero /usr/local/bin/velero" 300
-    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --backup-location-config region=$Region --wait" 600
+    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --backup-location-config region=$Region --no-secret --wait" 600
     $veleroCfg = (Get-Content (Join-Path $ManifestsDir (Join-Path "backup" "velero-config.yaml")) -Raw).Replace("PLACEHOLDER_BUCKET", $veleroBucket)
     $veleroCfgTemp = Join-Path $env:TEMP "velero-config.yaml"
     $veleroCfg | Set-Content $veleroCfgTemp -Encoding UTF8
