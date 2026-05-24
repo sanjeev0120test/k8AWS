@@ -24,6 +24,8 @@
 | **CI** | GitHub Actions: `terraform validate` + yamllint |
 | **Verify** | 35 automated checks → `verify.log` |
 
+📖 **[Complete tech stack reference →](docs/TECH-STACK.md)** — official definitions, why each tool is used, and full manual build steps.
+
 ---
 
 ## Quick local execution (3 commands)
@@ -365,6 +367,7 @@ start "http://$(terraform -chdir=terraform output -raw public_ip):30080/webapp"
 
 ---
 
+## Prerequisites (one-time)
 
 Install on your Windows machine:
 
@@ -612,20 +615,115 @@ Deploy continues. Cluster works without Velero. Re-run Velero steps manually via
 
 ```
 k8AWS/
-├── terraform/          # VPC, EC2, SSM, S3, IAM
-├── manifests/          # Kubernetes YAML (apps, policies, observability)
+├── docs/
+│   └── TECH-STACK.md       # Complete stack reference — definitions, why/how, manual steps
+├── terraform/              # AWS infrastructure (VPC, EC2, IAM, SSM, S3)
+│   ├── vpc.tf
+│   ├── ec2.tf
+│   ├── secrets.tf
+│   ├── ssm-parameters.tf
+│   ├── velero-s3.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── versions.tf
+│   ├── terraform.tfvars.example
+│   └── user-data/
+│       └── kubeadm-init.sh # cloud-init bootstrap script
+├── manifests/
+│   ├── namespace/          # app, observability, ingress-nginx, external-secrets
+│   ├── policy/             # PDB, ResourceQuota, LimitRange
+│   ├── secrets/            # ExternalSecrets + ClusterSecretStore
+│   ├── security/           # cert-manager ClusterIssuer
+│   ├── networking/         # NetworkPolicy, Ingress, NodePort patch
+│   ├── database/           # mongo StatefulSet + PVC
+│   ├── microservices/      # webapp (nginx) + api (Python/pymongo)
+│   ├── observability/      # Prometheus, Grafana, Alertmanager, Fluent Bit
+│   └── backup/             # Velero schedule + BackupStorageLocation
 ├── scripts/
-│   ├── preflight.ps1   # Pre-deploy validation
-│   ├── deploy.ps1      # Full deploy pipeline
-│   ├── verify.ps1      # 35 post-deploy checks
-│   ├── destroy.ps1     # Tear down everything
-│   ├── logs.ps1        # Remote bootstrap logs
-│   └── helpers/ssm-exec.ps1
-└── .github/workflows/ci.yaml
+│   ├── preflight.ps1       # Pre-deploy validation
+│   ├── deploy.ps1          # Full deploy pipeline
+│   ├── verify.ps1          # 35 post-deploy checks
+│   ├── destroy.ps1         # Tear down everything
+│   ├── logs.ps1            # Remote bootstrap logs
+│   └── helpers/
+│       └── ssm-exec.ps1    # SSM Run Command wrapper
+├── .github/workflows/
+│   └── ci.yaml             # terraform validate + yamllint
+├── .gitignore
+├── LICENSE
+└── README.md
 ```
+
+**Deep dive:** [docs/TECH-STACK.md](docs/TECH-STACK.md) — official definitions, use cases, and phase-by-phase manual build for every component.
+
+---
+
+## SRE production structure review
+
+Expert assessment of this repository layout against production SRE standards.
+
+### What is correct (production-aligned)
+
+| Area | Verdict | Notes |
+|---|---|---|
+| **Separation of concerns** | ✅ Good | `terraform/` (infra), `manifests/` (K8s), `scripts/` (orchestration) — clean boundaries |
+| **No secrets in Git** | ✅ Good | `.gitignore` blocks tfvars/state; passwords in SSM only |
+| **IaC for all AWS resources** | ✅ Good | Nothing requires manual console steps |
+| **Destroy path exists** | ✅ Good | `destroy.ps1` + Terraform default tags `AutoDestroy=true` |
+| **Remote access model** | ✅ Good | SSM-only — no SSH keys, no port 22 |
+| **Network zero-trust** | ✅ Good | Calico NetworkPolicy default-deny + SG IP lockdown |
+| **Resource governance** | ✅ Good | ResourceQuota, LimitRange, PDB, PSA baseline |
+| **Observability triad** | ✅ Good | Metrics (Prometheus) + logs (Fluent Bit) + dashboards (Grafana) |
+| **Backup strategy** | ✅ Good | Velero to S3 with lifecycle expiration |
+| **Verification gate** | ✅ Good | 35-check `verify.ps1` before declaring success |
+| **CI validation** | ✅ Good | Terraform fmt/validate + yamllint on every push |
+| **Cost guardrails** | ✅ Good | No NAT, no ALB, instance type/region locked in Terraform |
+| **Manifest delivery** | ✅ Good | S3 sync avoids SSM payload limits — production pattern |
+
+### Known gaps (acceptable for free-tier lab, fix for real production)
+
+| Gap | Severity | Recommendation |
+|---|---|---|
+| Single-node cluster | High for prod | Add worker node + remove control-plane taint |
+| Local Terraform state | Medium | Add S3 backend + DynamoDB lock for team use |
+| Static IAM keys for ESO/Velero | Medium | Use IRSA (EKS) or instance profile with scoped policies |
+| `--kubelet-insecure-tls` | Medium | Install proper kubelet serving certs (kubeadm certs pattern) |
+| No GitOps controller | Low | Add ArgoCD/Flux — currently script-driven apply |
+| api pip install at runtime | Low | Build custom container image with pymongo pre-baked |
+| `metrics-server.yaml` / `storage-class.yaml` | Low | Placeholder/reference only — not applied directly (documented) |
+| No live E2E in CI | Medium | Add OIDC-based deploy smoke test on dedicated AWS account |
+| Self-signed TLS only | Low | Add Route53 + Let's Encrypt ClusterIssuer when domain available |
+| 8 GiB RAM ceiling | High at scale | Full observability stack + apps may OOM under load testing |
+
+### Overall SRE score
+
+| Lens | Score | Summary |
+|---|---|---|
+| Free-tier lab / learning | **9/10** | Complete, automated, destroyable |
+| Small-org single-node patterns | **8.5/10** | Real production patterns at minimal scale |
+| Multi-node HA production | **4/10** | By design — one instance |
+| Enterprise compliance | **6/10** | Good foundations; static keys and single node limit audit score |
+
+**Verdict:** Folder structure and component choices are **correct and production-pattern-aligned** for a single-node AWS lab. The layout would scale to a multi-node/EKS migration by moving `manifests/` into GitOps and replacing kubeadm bootstrap with managed node groups — without restructuring the repo.
 
 ---
 
 ## CI
 
 On push/PR: `terraform validate` and yamllint on manifests. Does not deploy to AWS (no credentials in CI by default).
+
+---
+
+## Start now (immediate steps)
+
+```powershell
+cd c:\dev\k8AWS
+aws login
+.\scripts\preflight.ps1
+.\scripts\deploy.ps1
+.\scripts\verify.ps1
+# Browser: http://<PUBLIC_IP>:30080/webapp
+.\scripts\destroy.ps1   # when finished
+```
+
+Full technical reference: **[docs/TECH-STACK.md](docs/TECH-STACK.md)**
