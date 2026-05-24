@@ -1,6 +1,6 @@
 # Production-Grade Kubernetes on AWS Free Tier (2026)
 
-**Small-org production patterns** on **1× m7i-flex.large** (8 GB RAM) in **us-east-1** — fully automated from Windows/Cursor, strict $0 guardrails (no NAT, no ALB, no SSH).
+**Small-org production patterns** on **1× m7i-flex.large** (8 GB RAM) in **us-east-1** — fully automated from Windows or macOS, strict $0 guardrails (no NAT, no ALB, no SSH).
 
 **All documentation lives in this file.** Stack reference, diagrams, manual build steps, troubleshooting, and production architecture review — nothing else required.
 
@@ -678,7 +678,7 @@ AWS account requirements:
 
 ## Step-by-step: deploy the lab
 
-### 1. Clone and open in Cursor
+### 1. Clone the repository
 
 ```powershell
 cd c:\dev\k8AWS
@@ -800,7 +800,7 @@ If your IP changes mid-lab, update `allowed_ingress_cidr` in `terraform.tfvars` 
 ## Architecture
 
 ```
-Windows (Cursor)
+Windows / macOS
     │
     ├── deploy.ps1 ──► Terraform ──► EC2 m7i-flex.large (us-east-1)
     │                      │              ├── Custom VPC + IGW (no NAT)
