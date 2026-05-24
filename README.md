@@ -2,7 +2,24 @@
 
 **Small-org production patterns** on **1× m7i-flex.large** (8 GB RAM) in **us-east-1** — fully automated from Windows/Cursor, strict $0 guardrails (no NAT, no ALB, no SSH).
 
-> **This README is the single source of truth.** It contains the full technology stack, official definitions, why/how for every component, manual build steps, diagrams, and SRE review. A standalone copy also lives at [docs/TECH-STACK.md](docs/TECH-STACK.md).
+**All documentation lives in this file.** Stack reference, diagrams, manual build steps, troubleshooting, and SRE review — nothing else required.
+
+---
+
+## Real-world problems this lab solves
+
+| Scenario | Without this stack | How k8AWS solves it |
+|---|---|---|
+| **Learn kubeadm without EKS cost** | EKS control plane ~$73/mo | Self-managed cluster on free-tier EC2 (~$0.096/hr credits) |
+| **Secrets in Git leak in PRs** | Passwords in YAML or `.env` committed | Terraform → SSM → External Secrets → pods; never in Git |
+| **"Pods Running" but app broken** | No end-to-end verification | 35 checks: infra + SSM + HTTP + mongo_ok=True |
+| **Forgotten lab drains credits** | EC2/NAT left running overnight | `destroy.ps1` + S3 `force_destroy` + no NAT by design |
+| **SSH keys on public instances** | Port 22 scanned globally | SSM Session Manager only — outbound HTTPS |
+| **Any pod talks to any pod** | Lateral movement in breaches | Calico default-deny NetworkPolicy with explicit allows |
+| **Large YAML over SSM fails silently** | 4096-char Run Command limit | Manifests synced to S3; node pulls via IAM |
+| **Stateful app on ephemeral disk** | Mongo data lost on restart | StatefulSet + local-path PVC (2 Gi) |
+| **No observability in homelab** | Blind when api/mongo fails | Prometheus, Grafana, Fluent Bit, Alertmanager |
+| **No backup story** | Rebuild from scratch after mistake | Velero daily backup of `app` namespace to S3 |
 
 ---
 
@@ -10,6 +27,7 @@
 
 | Section | What it covers |
 |---|---|
+| [Real-world problems](#real-world-problems-this-lab-solves) | What this project fixes |
 | [Start now](#start-now-immediate-steps) | 4 commands to deploy |
 | [Complete technology stack](#complete-technology-stack) | All 27 technologies — definitions, why, use cases |
 | [Full manual build](#full-manual-build-procedure-phases-ak) | Phase-by-phase create guide |
@@ -32,7 +50,7 @@
 
 ## Complete technology stack
 
-Every technology used in this project with **official definition**, **why we chose it**, **the specific problem it solves here**, and **which files implement it**.
+Every technology below includes: **official definition**, **why we use it**, **the real problem it solves in this project**, **files**, and **how to create/configure it**.
 
 ### Stack inventory
 
@@ -70,28 +88,56 @@ Every technology used in this project with **official definition**, **why we cho
 
 ### Layer 1 — Local tooling
 
-| Technology | Official definition | Why in k8AWS | Problem it solves | Files |
-|---|---|---|---|---|
-| **Terraform** | IaC tool — define cloud resources declaratively and provision via APIs | Reproducible, reviewable, destroyable AWS infra | Manual console work cannot be reliably torn down; enforces cost guardrails | `terraform/*.tf` |
-| **AWS CLI** | Unified CLI for AWS APIs | Drives SSM, S3 sync, parameter reads from laptop | Remote kubectl without SSH or local kubeconfig | `scripts/*.ps1` |
-| **PowerShell** | Task automation shell | Chains Terraform + AWS + SSM on Windows/Cursor | 30+ manual steps → one `deploy.ps1` | `scripts/` |
+#### Terraform
+- **Definition:** IaC tool — declare AWS resources in HCL, provision via provider APIs.
+- **Real use case:** Same lab for every teammate; peer-reviewed infra changes; one-command teardown.
+- **Problem solved:** Console-clicked resources cannot be reliably destroyed or reproduced. Terraform enforces `m7i-flex.large` only, `us-east-1` only, no NAT.
+- **Files:** `terraform/*.tf`, `terraform/user-data/kubeadm-init.sh`
+- **Create:** `cd terraform && terraform init && terraform apply`
+
+#### AWS CLI v2
+- **Definition:** Unified CLI for all AWS service APIs.
+- **Real use case:** Run remote `kubectl` via SSM without installing kubeconfig locally or opening port 22.
+- **Problem solved:** Post-Terraform orchestration from a Windows laptop.
+- **Files:** `scripts/*.ps1`, `scripts/helpers/ssm-exec.ps1`
+
+#### PowerShell
+- **Definition:** Task automation shell for Windows.
+- **Real use case:** CI/CD-style pipeline on a developer machine — preflight → deploy → verify → destroy.
+- **Problem solved:** 30+ manual steps collapsed into `deploy.ps1`.
+- **Files:** `scripts/preflight.ps1`, `deploy.ps1`, `verify.ps1`, `destroy.ps1`, `logs.ps1`
 
 ---
 
 ### Layer 2 — AWS infrastructure
 
-| Technology | Official definition | Why in k8AWS | Problem it solves | Files |
-|---|---|---|---|---|
-| **VPC** | Logically isolated virtual network in AWS | Dedicated `10.0.0.0/16` with routing control | Clean destroy; security group boundaries | `terraform/vpc.tf` |
-| **Internet Gateway** | VPC component for internet access | Public subnet egress for apt, images, SSM | Avoids $32+/mo NAT Gateway | `terraform/vpc.tf` |
-| **EC2 m7i-flex.large** | Resizable cloud compute (2 vCPU, 8 GiB) | Free-tier eligible; hosts entire K8s stack | Full prod patterns without EKS cost | `terraform/ec2.tf` |
-| **Security Group** | Virtual firewall for EC2 | NodePort 30080/30300 locked to YOUR_IP/32 | Public IP without open-to-world apps | `terraform/ec2.tf` |
-| **SSM Session Manager** | Managed instance access without inbound ports | All remote ops — no SSH keys, no port 22 | Secure admin from any network | `terraform/ec2.tf`, `ssm-exec.ps1` |
-| **SSM Parameter Store** | Hierarchical config/secret storage | Mongo/Grafana passwords + IAM keys | Secrets never in Git or YAML | `terraform/secrets.tf`, `ssm-parameters.tf` |
-| **S3** | Object storage | Manifest delivery + Velero backups | Bypasses SSM 4096-char limit; DR target | `terraform/velero-s3.tf` |
-| **IAM** | Access management for AWS | 3 least-privilege principals (EC2 role, ESO user, Velero user) | Each component gets minimum permissions | `ec2.tf`, `ssm-parameters.tf`, `velero-s3.tf` |
+#### VPC + Internet Gateway
+- **Definition:** Isolated virtual network (`10.0.0.0/16`) with internet routing via IGW.
+- **Real use case:** Dedicated lab network — not mixed with default VPC resources.
+- **Problem solved:** Clean `terraform destroy` deletes entire stack; public subnet avoids **NAT Gateway (~$32+/mo)**.
+- **Resources:** VPC `10.0.0.0/16`, public subnet `10.0.1.0/24` in `us-east-1a`, route `0.0.0.0/0` → IGW.
+- **Files:** `terraform/vpc.tf`
 
-**SSM parameters created:**
+#### EC2 m7i-flex.large
+- **Definition:** 2 vCPU, 8 GiB RAM compute instance running Ubuntu 24.04 Noble.
+- **Real use case:** Host control plane + all workloads on one node for free-tier learning.
+- **Problem solved:** EKS control-plane cost avoided; enough RAM for observability + apps.
+- **Config:** 20 GiB gp3 encrypted root, IMDSv2 required, public IP, **no SSH (port 22)**, bootstrap via `user_data`.
+- **Files:** `terraform/ec2.tf`, `terraform/user-data/kubeadm-init.sh`
+
+#### SSM Session Manager + Run Command
+- **Definition:** Managed access and remote command execution without inbound ports.
+- **Real use case:** Production-style admin — audit trail, no bastion, no SSH key rotation.
+- **Problem solved:** All `kubectl apply` runs via `AWS-RunShellScript` from `deploy.ps1`.
+- **Connect:** `aws ssm start-session --target <INSTANCE_ID> --region us-east-1`
+- **Files:** `terraform/ec2.tf` (IAM `AmazonSSMManagedInstanceCore`), `scripts/helpers/ssm-exec.ps1`
+
+#### SSM Parameter Store
+- **Definition:** Encrypted hierarchical secret/config storage.
+- **Real use case:** Same pattern as AWS Secrets Manager + EKS External Secrets in production.
+- **Problem solved:** Mongo/Grafana passwords and IAM keys never touch Git or Kubernetes YAML.
+- **Parameters:** `/k8AWS/mongo-password`, `/k8AWS/grafana-admin-password`, ESO/Velero IAM keys (see table below).
+- **Files:** `terraform/secrets.tf`, `terraform/ssm-parameters.tf`, `terraform/velero-s3.tf`
 
 | Path | Content |
 |---|---|
@@ -103,133 +149,150 @@ Every technology used in this project with **official definition**, **why we cho
 | `/k8AWS/eso-secret-access-key` | ESO IAM secret |
 | `/k8AWS/velero-access-key-id` | Velero IAM key |
 | `/k8AWS/velero-secret-access-key` | Velero IAM secret |
+| `/k8AWS/velero-bucket` | S3 bucket name |
+
+#### S3
+- **Definition:** Durable object storage.
+- **Real use case (1):** Manifest delivery — EC2 pulls YAML from `s3://k8aws-velero-<ACCOUNT>/manifests/`.
+- **Real use case (2):** Velero backup target with 30-day lifecycle expiration.
+- **Problem solved:** SSM Run Command **4096-character limit** breaks large manifest apply; S3 is the production-style workaround.
+- **Files:** `terraform/velero-s3.tf` (`force_destroy = true` for clean teardown), `manifests/backup/velero-config.yaml`
+
+#### IAM (least privilege)
+| Principal | Permissions | Problem solved |
+|---|---|---|
+| EC2 instance role | SSM core + read `/k8AWS/*` SSM + read S3 manifests | Node ops without static keys on disk |
+| IAM user `k8AWS-eso-reader` | `ssm:GetParameter` on `/k8AWS/*` | ESO reads only what it needs |
+| IAM user `k8AWS-velero` | S3 read/write on Velero bucket | Backup isolation from ESO |
 
 ---
 
 ### Layer 3 — Node bootstrap (cloud-init)
 
-| Step | Official reference | Why | File |
-|---|---|---|---|
-| Disable swap | [kubeadm install](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/) | kubelet requirement | `user-data/kubeadm-init.sh` |
-| containerd + SystemdCgroup | [containerd docs](https://containerd.io/docs/) | Kubernetes CRI (not Docker) | same |
-| kubeadm init 1.29 | [kubeadm init](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-init/) | Conformant cluster without managed EKS | same |
-| Calico v3.26 | [Calico install](https://docs.tigera.io/calico/latest/getting-started/kubernetes/) | CNI + NetworkPolicy enforcement | same |
-| local-path-provisioner | [GitHub](https://github.com/rancher/local-path-provisioner) | Dynamic PVC on node disk | same |
-| Remove control-plane taint | Single-node pattern | Schedule apps on only node | same |
-| `/var/lib/k8s-ready` marker | k8AWS convention | Signals deploy.ps1 bootstrap done | same |
+Executed on first boot. Log: `/var/log/kubeadm-init.log`. Ready marker: `/var/lib/k8s-ready`.
+
+| Step | Why | Problem if skipped |
+|---|---|---|
+| Disable swap | kubelet requirement | kubelet refuses to start |
+| containerd + SystemdCgroup | Kubernetes CRI (not Docker) | dockershim removed since K8s 1.24 |
+| kubeadm init 1.29, pod CIDR `192.168.0.0/16` | Conformant control plane | No cluster |
+| Calico v3.26 | CNI + **NetworkPolicy** | Flannel alone cannot enforce policy |
+| local-path-provisioner v0.0.28 | Dynamic PVC on node disk | mongo has no persistent storage |
+| Remove control-plane taint | Single-node scheduling | Apps stuck Pending |
+| Write `/var/lib/k8s-ready` | Signal for deploy.ps1 | Race — apps applied before cluster ready |
+
+**Monitor:** `.\scripts\logs.ps1` or `ssm-exec.ps1 -Command "tail -50 /var/log/kubeadm-init.log"`
+
+**File:** `terraform/user-data/kubeadm-init.sh`
 
 ---
 
 ### Layer 4 — Kubernetes platform add-ons
 
-| Component | Official definition | Why in k8AWS | Problem it solves | Install source |
+| Component | Definition | Real use case | Problem solved | Pin |
 |---|---|---|---|---|
-| **metrics-server** | Cluster-wide resource usage aggregator | Powers `kubectl top` and HPA | `--kubelet-insecure-tls` patch for kubeadm self-signed kubelet certs | GitHub release v0.7.1 |
-| **cert-manager** | Automates TLS certificate management | Production TLS workflow demo | Self-signed ClusterIssuer for lab | GitHub release v1.14.5 |
-| **nginx-ingress** | Ingress controller using NGINX | L7 routing on NodePort 30080 | One entry for webapp + api — no ALB cost | ingress-nginx v1.11.1 baremetal |
-| **External Secrets Operator** | Syncs external secrets into K8s | SSM → native Kubernetes Secrets | Pods use `secretKeyRef` — no AWS SDK in apps | external-secrets v0.9.20 |
+| **metrics-server** | Aggregates pod/node CPU/memory | HPA on webapp; `kubectl top` | Without it, HPA and verify check #27 fail | v0.7.1 + `--kubelet-insecure-tls` |
+| **cert-manager** | Automates TLS certificates | Production cert workflow demo | Manual cert rotation doesn't scale | v1.14.5 |
+| **nginx-ingress** | L7 Ingress controller (NGINX) | Route `/webapp` and `/api` on one NodePort | ALB costs ~$16+/mo — avoid on lab | controller v1.11.1 baremetal |
+| **External Secrets** | Syncs external vault into K8s Secrets | EKS + Secrets Manager pattern on kubeadm | Hardcoded secrets in Deployments | v0.9.20 |
+
+**ClusterIssuer:** self-signed (`manifests/security/cert-manager-issuer.yaml`) — swap for Let's Encrypt when you have a domain.
 
 ---
 
-### Layer 5 — Secrets flow
+### Layer 5 — Secrets management
 
 ```mermaid
 flowchart LR
     TF["Terraform random_password"] --> SSM["SSM SecureString"]
     SSM --> ESO["External Secrets Operator"]
     ESO --> KS["K8s Secrets"]
-    KS --> POD["Pod env vars"]
+    KS --> POD["Pod secretKeyRef"]
 ```
 
-| Step | Why |
+| Resource | Purpose |
 |---|---|
-| Terraform generates passwords | Never in Git |
-| SSM stores encrypted | Central vault with audit trail |
-| ESO syncs to K8s | Standard pod secret consumption |
-| Files | `terraform/secrets.tf`, `manifests/secrets/external-secrets.yaml` |
+| `ClusterSecretStore` `aws-ssm` | ESO → Parameter Store connection |
+| `ExternalSecret` `mongo-credentials` | Mongo root user/pass in `app` namespace |
+| `ExternalSecret` `grafana-admin-credentials` | Grafana login in `observability` namespace |
+
+**Real use case:** Rotate password in SSM → ESO refreshes K8s Secret → restart pod. No Terraform re-apply for app secrets.
+
+**Files:** `terraform/secrets.tf`, `manifests/secrets/external-secrets.yaml`
 
 ---
 
 ### Layer 6 — Application workloads
 
-| Workload | Kind | Official definition | Why StatefulSet/Deployment | Problem it solves | File |
-|---|---|---|---|---|---|
-| **webapp** | Deployment + HPA | nginx HTTP server | Stateless — scales horizontally | Ingress + autoscaling demo | `microservices/webapp-deployment.yaml` |
-| **api** | Deployment | Python HTTP + pymongo | Stateless API layer | Proves api→mongo + secret injection | `microservices/api-deployment.yaml` |
-| **mongo** | StatefulSet + PVC | MongoDB document database | Stateful — needs stable ID + disk | Persistent data survives pod restart | `database/mongo-statefulset.yaml` |
+| Workload | Kind | Real use case | Problem solved | File |
+|---|---|---|---|---|
+| **webapp** | Deployment + HPA | Stateless front-end behind ingress | Proves L7 routing + autoscaling | `microservices/webapp-deployment.yaml` |
+| **api** | Deployment + initContainer | Service-to-service health check | Proves secrets + api→mongo path; verify checks `mongo_ok=True` | `microservices/api-deployment.yaml` |
+| **mongo** | StatefulSet + 2Gi PVC | Persistent database | Data survives pod restart; stable DNS `mongo-0` | `database/mongo-statefulset.yaml` |
 
-**Deploy order enforced:** mongo Ready → api → webapp → ingress (see `deploy.ps1`).
+**Deploy order (enforced in deploy.ps1):** mongo Ready → api → webapp → ingress.
+
+**Why StatefulSet for mongo:** Deployments don't guarantee stable network identity or PVC binding — wrong tool for databases.
 
 ---
 
 ### Layer 7 — Networking and security
 
-| Component | Official definition | k8AWS use case | File |
-|---|---|---|---|
-| **NetworkPolicy** | K8s API for pod-level firewall rules | default-deny + explicit allow (api→mongo, ingress→webapp) | `networking/networkpolicy.yaml` |
-| **Ingress** | K8s API for L7 HTTP routing | `/webapp` → nginx, `/api` → Python | `networking/ingress-rules.yaml` |
-| **NodePort patch** | Exposes service on fixed host port | Pin HTTP to 30080 | `networking/nginx-ingress-nodeport.yaml` |
-| **Pod Security Admission** | Enforces Pod Security Standards | `baseline` on `app` namespace | `namespace/app-namespace.yaml` |
-| **PDB / Quota / LimitRange** | Reliability and resource governance | Prevent namespace exhaustion on 8 GiB node | `policy/guardrails.yaml` |
+| Component | Real use case | Problem solved |
+|---|---|---|
+| **NetworkPolicy default-deny** | Zero-trust pod networking | Compromised pod cannot scan entire cluster |
+| **SG YOUR_IP/32** | Lock NodePorts 30080/30300 | Public IP without open-to-world |
+| **PSA baseline** on `app` ns | Block privileged pods | Aligns with production cluster policy |
+| **PDB minAvailable: 1** | Survive voluntary disruptions | Pattern for when you scale to 2+ replicas |
+| **ResourceQuota + LimitRange** | Cap namespace on 8 GiB node | One runaway Deployment can't OOM the node |
 
-**NetworkPolicy rules (6 total):**
+**NetworkPolicy rules (6):** `default-deny-all` · `allow-dns-egress` · `allow-ingress-to-webapp-api` · `allow-clients-to-mongo` · `allow-api-egress-mongo` · `allow-api-egress-https` (PyPI for api initContainer)
 
-| Policy | Solves |
-|---|---|
-| `default-deny-all` | Block unexpected traffic |
-| `allow-dns-egress` | DNS resolution via kube-system |
-| `allow-ingress-to-webapp-api` | Only nginx namespace reaches frontends |
-| `allow-clients-to-mongo` | Only webapp + api reach mongo:27017 |
-| `allow-api-egress-mongo` | api egress restricted to mongo |
-| `allow-api-egress-https` | api initContainer pip install from PyPI |
+**Files:** `manifests/networking/networkpolicy.yaml`, `ingress-rules.yaml`, `nginx-ingress-nodeport.yaml`, `policy/guardrails.yaml`, `namespace/app-namespace.yaml`
 
 ---
 
 ### Layer 8 — Observability
 
-| Component | Official definition | Why | File |
+| Component | Real use case | Problem solved | Access |
 |---|---|---|---|
-| **Prometheus** | Time-series metrics collection | Scrapes annotated pods; feeds alerts | `observability/prometheus-grafana.yaml` |
-| **Alertmanager** | Alert routing and deduplication | Production alert pipeline pattern | `observability/alertmanager.yaml` |
-| **Grafana** | Metrics visualization dashboards | Human-readable health; password from SSM | `observability/prometheus-grafana.yaml` |
-| **Fluent Bit** | Log processor/forwarder DaemonSet | Container log collection pattern | `observability/fluent-bit.yaml` |
+| **Prometheus** | Scrape pod metrics via annotations | Know when api/webapp degrade before users do | ClusterIP |
+| **Alertmanager** | Route/deduplicate alerts | Production alert pipeline (add Slack/PagerDuty later) | ClusterIP |
+| **Grafana** | Dashboards for humans | Visual confirmation cluster healthy | **NodePort 30300** |
+| **Fluent Bit** | Collect container stdout/stderr | Same agent pattern as EKS → CloudWatch | DaemonSet |
 
-Grafana exposed on **NodePort 30300** (direct, not via Ingress).
+**Grafana password:** `aws ssm get-parameter --name /k8AWS/grafana-admin-password --with-decryption --region us-east-1 --query Parameter.Value --output text`
+
+**Files:** `manifests/observability/prometheus-grafana.yaml`, `alertmanager.yaml`, `fluent-bit.yaml`
 
 ---
 
 ### Layer 9 — Backup (Velero)
 
-| Component | Official definition | Why | File |
-|---|---|---|---|
-| **Velero** | K8s backup/restore tool | Daily `app` namespace backup to S3 | `backup/velero-config.yaml` + `deploy.ps1` |
-| **S3 lifecycle** | Auto-expire old objects | 30-day retention — controls cost | `terraform/velero-s3.tf` |
-
-Schedule: `0 3 * * *` UTC — TTL 720h (30 days).
+- **Definition:** Kubernetes backup/restore to object storage.
+- **Real use case:** Accidentally delete app namespace — restore from S3 without rebuilding cluster.
+- **Problem solved:** Verify check #35 confirms Completed backup exists.
+- **Schedule:** daily `0 3 * * *` UTC, TTL 720h, bucket `k8aws-velero-<ACCOUNT_ID>`.
+- **Files:** `manifests/backup/velero-config.yaml`, Velero install in `deploy.ps1`
 
 ---
 
 ### Layer 10 — Automation scripts
 
-| Script | Purpose | When |
+| Script | Real use case | When |
 |---|---|---|
-| `preflight.ps1` | Validate AWS creds, tools, free-tier | Before deploy |
-| `deploy.ps1` | Full pipeline: Terraform → K8s → Velero | Create lab |
-| `verify.ps1` | 35 checks (SSM + HTTP) | After deploy |
-| `destroy.ps1` | `terraform destroy` + verify | End of lab |
-| `logs.ps1` | Bootstrap/kubelet logs via SSM | Debug |
-| `helpers/ssm-exec.ps1` | SSM Run Command wrapper | Manual ops |
+| `preflight.ps1` | Catch missing tools/creds before spending 25 min | Before deploy |
+| `deploy.ps1` | One pipeline: Terraform → bootstrap wait → K8s → Velero | Create lab |
+| `verify.ps1` | 35 gates — infra, pods, HTTP, backup | After deploy |
+| `destroy.ps1` | Stop credit burn; verify no EC2 left | End of lab |
+| `logs.ps1` | Debug bootstrap without guessing | When stuck |
+| `ssm-exec.ps1` | Ad-hoc remote kubectl | Manual ops |
 
 ---
 
 ### Layer 11 — CI
 
-| Check | Tool | File |
-|---|---|---|
-| Terraform format + validate | `terraform fmt -check`, `validate` | `.github/workflows/ci.yaml` |
-| YAML lint | `yamllint` | same |
-
-CI does **not** deploy to AWS (no credentials in GitHub by default).
+GitHub Actions (`.github/workflows/ci.yaml`): `terraform fmt -check`, `terraform validate`, `yamllint manifests/`. Catches broken configs before anyone runs deploy. Does **not** deploy to AWS.
 
 ---
 
@@ -356,6 +419,8 @@ Verify these **before and during deploy** for a smooth run:
 
 ---
 
+## What you get
+
 | Layer | Implementation |
 |---|---|
 | **IaC** | Terraform: VPC, EC2, SSM secrets, S3 (Velero + manifest delivery), IAM least-privilege |
@@ -374,7 +439,7 @@ Verify these **before and during deploy** for a smooth run:
 | **CI** | GitHub Actions: `terraform validate` + yamllint |
 | **Verify** | 35 automated checks → `verify.log` |
 
-See [Complete technology stack](#complete-technology-stack) above for all definitions and manual steps.
+See [Complete technology stack](#complete-technology-stack) above for full definitions, real use cases, and manual steps.
 
 ---
 
@@ -846,8 +911,6 @@ Deploy continues. Cluster works without Velero. Re-run Velero steps manually via
 
 ```
 k8AWS/
-├── docs/
-│   └── TECH-STACK.md       # Complete stack reference — definitions, why/how, manual steps
 ├── terraform/              # AWS infrastructure (VPC, EC2, IAM, SSM, S3)
 │   ├── vpc.tf
 │   ├── ec2.tf
@@ -882,10 +945,8 @@ k8AWS/
 │   └── ci.yaml             # terraform validate + yamllint
 ├── .gitignore
 ├── LICENSE
-└── README.md
+└── README.md               # All documentation (this file)
 ```
-
-**Deep dive:** [docs/TECH-STACK.md](docs/TECH-STACK.md) — official definitions, use cases, and phase-by-phase manual build for every component.
 
 ---
 
@@ -956,5 +1017,3 @@ aws login
 # Browser: http://<PUBLIC_IP>:30080/webapp
 .\scripts\destroy.ps1   # when finished
 ```
-
-Full technical reference (standalone copy): **[docs/TECH-STACK.md](docs/TECH-STACK.md)** — identical content also in this README above.
