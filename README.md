@@ -26,7 +26,345 @@
 
 ---
 
-## Prerequisites (one-time)
+## Quick local execution (3 commands)
+
+Everything runs from your **local Windows machine** — no bastion, no SSH. Terraform creates AWS resources; PowerShell drives the rest over **SSM Run Command**.
+
+```powershell
+cd c:\dev\k8AWS
+aws login
+.\scripts\preflight.ps1          # validate tools + AWS creds
+.\scripts\deploy.ps1             # Terraform + kubeadm + K8s apps (~25 min)
+.\scripts\verify.ps1             # 35 checks → verify.log
+```
+
+When finished:
+
+```powershell
+.\scripts\destroy.ps1            # tear down ALL AWS resources
+```
+
+Non-interactive mode (no prompts):
+
+```powershell
+$env:K8AWS_AUTO_APPROVE = "true"
+.\scripts\deploy.ps1
+$env:K8AWS_AUTO_APPROVE = "true"
+.\scripts\destroy.ps1
+```
+
+**What “local” means here:** your laptop orchestrates AWS API calls (Terraform, SSM, S3 sync). The Kubernetes control plane and workloads run on the EC2 instance in AWS — there is no local kind/minikube cluster. This mirrors how real teams operate: IaC from CI/laptop, workloads in cloud.
+
+---
+
+## Engineering architecture
+
+High-level view of how your laptop, AWS, and Kubernetes connect.
+
+```mermaid
+flowchart TB
+    subgraph LOCAL["Your Windows machine"]
+        PS["PowerShell scripts"]
+        TF["Terraform CLI"]
+        AWSCLI["AWS CLI"]
+    end
+
+    subgraph AWS["AWS us-east-1"]
+        subgraph NET["VPC 10.0.0.0/16"]
+            IGW["Internet Gateway"]
+            EC2["EC2 m7i-flex.large<br/>kubeadm single-node"]
+        end
+        SSM["SSM Parameter Store<br/>passwords + IAM keys"]
+        S3["S3 bucket<br/>manifests + Velero backups"]
+        IAM["IAM roles + users<br/>ESO / Velero / EC2"]
+    end
+
+    subgraph K8S["Kubernetes on EC2"]
+        CP["Control plane<br/>kube-apiserver / etcd"]
+        CNI["Calico CNI"]
+        ING["nginx-ingress<br/>NodePort 30080"]
+        APP["webapp + api + mongo"]
+        OBS["Prometheus / Grafana / Fluent Bit"]
+        ESO["External Secrets Operator"]
+        VEL["Velero"]
+    end
+
+    PS --> TF
+    PS --> AWSCLI
+    TF --> NET
+    TF --> SSM
+    TF --> S3
+    TF --> IAM
+    AWSCLI -->|"SSM Run Command"| EC2
+    AWSCLI -->|"s3 sync manifests"| S3
+    EC2 --> K8S
+    S3 -->|"EC2 IAM read"| EC2
+    SSM -->|"ESO sync"| ESO
+    S3 --> VEL
+    IGW <-->|"HTTPS egress"| EC2
+    LOCAL -->|"HTTP :30080 / :30300<br/>your IP/32 only"| IGW
+```
+
+---
+
+## AWS network topology
+
+Why **no NAT Gateway**: NAT costs ~$32+/month and is unnecessary — the node sits in a **public subnet** with a public IP. Inbound user traffic is restricted by security group to **your IP/32**; outbound (apt, container pulls, SSM) uses the IGW directly.
+
+```mermaid
+flowchart LR
+    subgraph Internet
+        YOU["Your browser<br/>YOUR_IP/32"]
+    end
+
+    subgraph VPC["VPC 10.0.0.0/16"]
+        IGW["Internet Gateway"]
+        subgraph PUB["Public subnet 10.0.1.0/24"]
+            EC2["EC2 node<br/>Public + Private IP"]
+        end
+    end
+
+    YOU -->|"TCP 30080, 30300"| IGW
+    IGW --> EC2
+    EC2 -->|"all egress"| IGW
+    IGW --> Internet
+
+    style NAT fill:#f9f,stroke:#333,stroke-dasharray: 5 5
+    NAT["NAT Gateway<br/>NOT CREATED"]
+```
+
+| Security group rule | Port | Source | Why |
+|---|---|---|---|
+| NodePort HTTP | 30080 | `allowed_ingress_cidr` | nginx-ingress for webapp/api |
+| Grafana NodePort | 30300 | `allowed_ingress_cidr` | Grafana UI |
+| HTTP | 80 | `allowed_ingress_cidr` | hostNetwork ingress fallback |
+| Kubelet | 10250 | VPC CIDR | internal node health |
+| K8s API | 6443 | VPC CIDR | in-VPC API access |
+| SSH | 22 | — | **blocked by design** |
+| Egress | all | 0.0.0.0/0 | SSM, apt, image pulls, PyPI |
+
+Access to the node shell uses **SSM Session Manager** (outbound HTTPS to AWS endpoints) — no inbound SSH required.
+
+---
+
+## End-to-end deploy flowchart
+
+What `deploy.ps1` does, in order, and why each phase exists.
+
+```mermaid
+flowchart TD
+    A([Start deploy.ps1]) --> B[preflight.ps1]
+    B --> C{terraform.tfvars<br/>exists?}
+    C -->|No| D[Auto-detect public IP<br/>write YOUR_IP/32]
+    C -->|Yes| E[terraform init + apply]
+    D --> E
+    E --> F[Wait SSM Online]
+    F --> G[Wait /var/lib/k8s-ready<br/>kubeadm + Calico done]
+    G --> H[Sync manifests/ → S3]
+    H --> I[Install metrics-server]
+    I --> J[Install cert-manager]
+    J --> K[Install nginx-ingress<br/>patch NodePort 30080]
+    K --> L[Install External Secrets Operator]
+    L --> M[Apply ESO AWS creds secret]
+    M --> N[Apply namespaces + guardrails]
+    N --> O[Apply ExternalSecrets<br/>wait K8s secrets synced]
+    O --> P[Prometheus + Grafana + Alertmanager]
+    P --> Q[Apply NetworkPolicies<br/>before workloads]
+    Q --> R[Deploy mongo StatefulSet<br/>wait Ready]
+    R --> S[Deploy api + webapp<br/>wait Ready]
+    S --> T[Apply Ingress rules]
+    T --> U{Velero install}
+    U -->|Success| V[First backup to S3]
+    U -->|Fail| W[Non-fatal warning]
+    V --> X([Print URLs + done])
+    W --> X
+```
+
+**Why S3 for manifests?** SSM Run Command has a **4096-character limit** per command. Base64-encoding YAML exceeds that. The EC2 instance pulls manifests from S3 using its instance profile — same pattern as production GitOps artifact delivery.
+
+**Why mongo before api?** The API initContainer installs `pymongo` and probes MongoDB on startup. Starting mongo first avoids crash-loop races.
+
+**Why NetworkPolicies before apps?** Policies are applied while pods are still coming up so restarts behave correctly under default-deny rules (api→mongo ingress, api→PyPI egress on 443).
+
+---
+
+## HTTP request path (runtime)
+
+How a browser request reaches your microservices.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant SG as Security Group
+    participant NP as NodePort 30080
+    participant IC as nginx-ingress controller
+    participant ING as Ingress resource
+    participant WEB as webapp Service
+    participant API as api Service
+    participant MDB as mongo StatefulSet
+
+    B->>SG: GET /webapp (YOUR_IP/32)
+    SG->>NP: allow if CIDR matches
+    NP->>IC: forward to controller pod
+    IC->>ING: match path /webapp
+    ING->>WEB: rewrite → nginx:80
+    WEB-->>B: HTML response
+
+    B->>NP: GET /api
+    NP->>IC: forward
+    IC->>ING: match path /api Prefix
+    ING->>API: api:8080
+    API->>MDB: pymongo ping :27017
+    MDB-->>API: pong
+    API-->>B: mongo_ok=True
+```
+
+Grafana bypasses Ingress and is exposed directly on **NodePort 30300** (defined in `prometheus-grafana.yaml`) for simpler lab access.
+
+---
+
+## Secrets lifecycle
+
+Why secrets never live in Git.
+
+```mermaid
+flowchart LR
+    TF["Terraform<br/>random_password"] --> SSM["SSM Parameter Store<br/>SecureString"]
+    SSM --> ESO["External Secrets Operator<br/>ClusterSecretStore aws-ssm"]
+    ESO --> KS["Kubernetes Secrets<br/>mongo-credentials<br/>grafana-admin-credentials"]
+    KS --> POD["App pods<br/>env / volumeMount"]
+
+    IAM["IAM user k8AWS-eso-reader<br/>ssm:GetParameter only"] --> ESO
+```
+
+| Step | Component | Why |
+|---|---|---|
+| Generate | `random_password` in Terraform | Cryptographically random; not in Git |
+| Store | SSM Parameter Store | Encrypted at rest; audit trail; rotation-friendly |
+| Sync | External Secrets Operator | Kubernetes-native; pods consume standard Secrets |
+| Consume | Deployments / StatefulSets | `secretKeyRef` — same pattern as EKS + Secrets Manager |
+
+---
+
+## Component reference — why and how
+
+Technical rationale for each layer. This is how a cloud/SRE team would justify the design.
+
+### Infrastructure (Terraform)
+
+| Resource | What it does | Why we use it |
+|---|---|---|
+| **VPC + public subnet** | Isolated network for the node | Required for security groups, routing, and future multi-AZ expansion |
+| **Internet Gateway** | Bidirectional internet for public subnet | Node pulls container images and packages; no NAT saves ~$32/mo |
+| **EC2 m7i-flex.large** | 2 vCPU, 8 GiB RAM | Free-tier eligible on 2026 accounts; minimum viable for full stack |
+| **IAM instance profile** | `AmazonSSMManagedInstanceCore` + SSM read + S3 read | SSM access without SSH; ESO can read params; EC2 pulls manifests from S3 |
+| **SSM parameters** | Mongo/Grafana passwords, ESO/Velero IAM keys | Central secret store; never committed to Git |
+| **S3 bucket** | Velero backups + manifest staging | Durable object storage within 5 GB free tier; 30-day lifecycle |
+
+### Bootstrap (cloud-init / user-data)
+
+| Step | What it does | Why we use it |
+|---|---|---|
+| **swap off** | Disables swap | kubelet requirement — swap causes pod scheduling issues |
+| **containerd** | Container runtime (CRI) | Kubernetes-native CRI; lighter than Docker CE for nodes |
+| **kubeadm init** | Installs control plane + kubelet | Standard way to build conformant clusters without managed EKS cost |
+| **Calico** | CNI + NetworkPolicy enforcement | Industry-standard overlay; supports `NetworkPolicy` (Flannel alone does not) |
+| **local-path-provisioner** | Dynamic PV on node disk | Gives mongo a real PVC without EBS CSI complexity on free tier |
+| **Taint removal** | Schedules workloads on control-plane | Single-node lab — no separate worker EC2 |
+
+### Platform add-ons
+
+| Component | What it does | Why we use it |
+|---|---|---|
+| **metrics-server** | Aggregates pod/node CPU/memory | Required for `kubectl top` and HPA |
+| **nginx-ingress** | L7 routing by URL path | One entry point for webapp + api without multiple Load Balancers |
+| **cert-manager** | TLS certificate automation | Production pattern; self-signed issuer for lab (swap for Let's Encrypt with real DNS) |
+| **External Secrets** | Syncs SSM → K8s Secrets | Same pattern as AWS Secrets Manager + ESO on EKS |
+| **Velero** | Cluster backup to S3 | Disaster recovery for app namespace; scheduled daily at 03:00 UTC |
+
+### Application layer
+
+| Component | What it does | Why we use it |
+|---|---|---|
+| **webapp (nginx)** | Static front-end + HPA | Demonstrates stateless scaling and ingress routing |
+| **api (Python/pymongo)** | Health endpoint with Mongo ping | Proves service-to-service connectivity and secret injection |
+| **mongo StatefulSet** | Persistent database with PVC | Stateful workloads need stable identity + storage — Deployment is wrong here |
+| **NetworkPolicies** | default-deny + explicit allow | Zero-trust pod networking — api only talks to mongo on 27017, ingress only from nginx namespace |
+
+### Observability
+
+| Component | What it does | Why we use it |
+|---|---|---|
+| **Prometheus** | Scrapes pod metrics via annotations | Industry-standard metrics; feeds alerts and Grafana |
+| **Alertmanager** | Routes alert notifications | Production pattern — rules defined even if notifications go nowhere in lab |
+| **Grafana** | Dashboards + login | Visual confirmation cluster is healthy; password from SSM |
+| **Fluent Bit** | Log collection DaemonSet | Same agent pattern used on EKS Fargate / CloudWatch pipelines |
+
+### Guardrails
+
+| Resource | What it does | Why we use it |
+|---|---|---|
+| **PodDisruptionBudget** | minAvailable: 1 | Prevents voluntary disruption from draining all replicas (meaningful when scaled) |
+| **ResourceQuota** | Caps CPU/memory/pods in `app` | Prevents one namespace from exhausting single-node capacity |
+| **LimitRange** | Default container requests/limits | Ensures every pod has resource bounds — required for fair scheduling |
+| **PSA baseline** | Pod Security Admission on `app` ns | Blocks privileged pods; aligns with production cluster policy |
+
+---
+
+## Manual step-by-step (if you prefer not to use deploy.ps1)
+
+For learning or debugging — same outcome as the automated script.
+
+### Phase 1 — AWS infrastructure
+
+```powershell
+cd c:\dev\k8AWS\terraform
+copy terraform.tfvars.example terraform.tfvars   # edit allowed_ingress_cidr to YOUR_IP/32
+terraform init
+terraform plan
+terraform apply
+terraform output
+```
+
+### Phase 2 — Wait for cluster bootstrap
+
+```powershell
+cd c:\dev\k8AWS
+$ID = terraform -chdir=terraform output -raw instance_id
+
+# Wait until SSM is Online (repeat until Online)
+aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" --region us-east-1
+
+# Wait until kubeadm finished
+.\scripts\helpers\ssm-exec.ps1 -Command "test -f /var/lib/k8s-ready && echo READY"
+```
+
+### Phase 3 — Upload manifests and apply platform stack
+
+```powershell
+$BUCKET = terraform -chdir=terraform output -raw velero_bucket_name
+aws s3 sync manifests "s3://$BUCKET/manifests/" --delete --region us-east-1
+
+# On the instance via SSM — install add-ons (metrics-server, cert-manager, ingress, ESO)
+# Full command sequence is in scripts/deploy.ps1 — run that script instead for reliability.
+.\scripts\deploy.ps1
+```
+
+### Phase 4 — Verify and use
+
+```powershell
+.\scripts\verify.ps1
+start "http://$(terraform -chdir=terraform output -raw public_ip):30080/webapp"
+```
+
+### Phase 5 — Destroy
+
+```powershell
+.\scripts\destroy.ps1
+```
+
+---
+
 
 Install on your Windows machine:
 
