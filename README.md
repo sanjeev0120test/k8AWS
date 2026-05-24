@@ -2,9 +2,359 @@
 
 **Small-org production patterns** on **1× m7i-flex.large** (8 GB RAM) in **us-east-1** — fully automated from Windows/Cursor, strict $0 guardrails (no NAT, no ALB, no SSH).
 
+> **This README is the single source of truth.** It contains the full technology stack, official definitions, why/how for every component, manual build steps, diagrams, and SRE review. A standalone copy also lives at [docs/TECH-STACK.md](docs/TECH-STACK.md).
+
 ---
 
-## What you get
+## Table of contents
+
+| Section | What it covers |
+|---|---|
+| [Start now](#start-now-immediate-steps) | 4 commands to deploy |
+| [Complete technology stack](#complete-technology-stack) | All 27 technologies — definitions, why, use cases |
+| [Full manual build](#full-manual-build-procedure-phases-ak) | Phase-by-phase create guide |
+| [Critical run checklist](#critical-run-checklist) | Pre-flight checks for smooth deploy |
+| [What you get](#what-you-get) | Summary table |
+| [Quick local execution](#quick-local-execution-3-commands) | Automated deploy |
+| [Engineering architecture](#engineering-architecture) | System diagram |
+| [AWS network topology](#aws-network-topology) | VPC / security group diagram |
+| [Deploy flowchart](#end-to-end-deploy-flowchart) | deploy.ps1 sequence |
+| [HTTP request path](#http-request-path-runtime) | Runtime sequence diagram |
+| [Secrets lifecycle](#secrets-lifecycle) | SSM → ESO → pods |
+| [Prerequisites](#prerequisites-one-time) | Tools and AWS account |
+| [Step-by-step deploy](#step-by-step-deploy-the-lab) | Detailed walkthrough |
+| [Configuration](#configuration) | terraform.tfvars variables |
+| [Troubleshooting](#troubleshooting) | Common failures |
+| [Project layout](#project-layout) | Folder tree |
+| [SRE structure review](#sre-production-structure-review) | Production expert assessment |
+
+---
+
+## Complete technology stack
+
+Every technology used in this project with **official definition**, **why we chose it**, **the specific problem it solves here**, and **which files implement it**.
+
+### Stack inventory
+
+| # | Technology | Version / pin | Official docs |
+|---|---|---|---|
+| 1 | Terraform | ≥ 1.5 | [terraform.io/docs](https://developer.hashicorp.com/terraform/docs) |
+| 2 | AWS Provider | ~> 5.0 | [registry.terraform.io/hashicorp/aws](https://registry.terraform.io/providers/hashicorp/aws/latest/docs) |
+| 3 | Amazon VPC | — | [docs.aws.amazon.com/vpc](https://docs.aws.amazon.com/vpc/latest/userguide/) |
+| 4 | Amazon EC2 | m7i-flex.large | [docs.aws.amazon.com/ec2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/) |
+| 5 | AWS SSM Session Manager | — | [Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html) |
+| 6 | AWS SSM Parameter Store | — | [Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) |
+| 7 | Amazon S3 | — | [docs.aws.amazon.com/s3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/) |
+| 8 | AWS IAM | — | [docs.aws.amazon.com/iam](https://docs.aws.amazon.com/IAM/latest/UserGuide/) |
+| 9 | Ubuntu Server | 24.04 Noble | [ubuntu.com/server/docs](https://ubuntu.com/server/docs) |
+| 10 | containerd | apt package | [containerd.io/docs](https://containerd.io/docs/) |
+| 11 | kubeadm / kubelet / kubectl | 1.29 | [kubeadm docs](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/) |
+| 12 | Calico CNI | v3.26.0 | [docs.tigera.io/calico](https://docs.tigera.io/calico/latest/about/) |
+| 13 | local-path-provisioner | v0.0.28 | [GitHub](https://github.com/rancher/local-path-provisioner) |
+| 14 | metrics-server | v0.7.1 | [GitHub](https://github.com/kubernetes-sigs/metrics-server) |
+| 15 | cert-manager | v1.14.5 | [cert-manager.io/docs](https://cert-manager.io/docs/) |
+| 16 | nginx-ingress | v1.11.1 | [ingress-nginx docs](https://kubernetes.github.io/ingress-nginx/) |
+| 17 | External Secrets Operator | v0.9.20 | [external-secrets.io](https://external-secrets.io/latest/) |
+| 18 | Velero | v1.14.0 | [velero.io/docs](https://velero.io/docs/) |
+| 19 | MongoDB | 7 | [mongodb.com/docs](https://www.mongodb.com/docs/) |
+| 20 | nginx (app) | 1.27.3-alpine | [nginx.org/en/docs](https://nginx.org/en/docs/) |
+| 21 | Python / pymongo | 3.12 / 4.7.3 | [pymongo docs](https://pymongo.readthedocs.io/) |
+| 22 | Prometheus | 2.x image | [prometheus.io/docs](https://prometheus.io/docs/introduction/overview/) |
+| 23 | Alertmanager | 0.x image | [Alertmanager docs](https://prometheus.io/docs/alerting/latest/alertmanager/) |
+| 24 | Grafana | 11.0.0 | [grafana.com/docs](https://grafana.com/docs/grafana/latest/) |
+| 25 | Fluent Bit | latest stable | [docs.fluentbit.io](https://docs.fluentbit.io/manual/) |
+| 26 | PowerShell | 5.1+ | [Microsoft docs](https://learn.microsoft.com/en-us/powershell/) |
+| 27 | GitHub Actions | — | [docs.github.com/actions](https://docs.github.com/en/actions) |
+
+---
+
+### Layer 1 — Local tooling
+
+| Technology | Official definition | Why in k8AWS | Problem it solves | Files |
+|---|---|---|---|---|
+| **Terraform** | IaC tool — define cloud resources declaratively and provision via APIs | Reproducible, reviewable, destroyable AWS infra | Manual console work cannot be reliably torn down; enforces cost guardrails | `terraform/*.tf` |
+| **AWS CLI** | Unified CLI for AWS APIs | Drives SSM, S3 sync, parameter reads from laptop | Remote kubectl without SSH or local kubeconfig | `scripts/*.ps1` |
+| **PowerShell** | Task automation shell | Chains Terraform + AWS + SSM on Windows/Cursor | 30+ manual steps → one `deploy.ps1` | `scripts/` |
+
+---
+
+### Layer 2 — AWS infrastructure
+
+| Technology | Official definition | Why in k8AWS | Problem it solves | Files |
+|---|---|---|---|---|
+| **VPC** | Logically isolated virtual network in AWS | Dedicated `10.0.0.0/16` with routing control | Clean destroy; security group boundaries | `terraform/vpc.tf` |
+| **Internet Gateway** | VPC component for internet access | Public subnet egress for apt, images, SSM | Avoids $32+/mo NAT Gateway | `terraform/vpc.tf` |
+| **EC2 m7i-flex.large** | Resizable cloud compute (2 vCPU, 8 GiB) | Free-tier eligible; hosts entire K8s stack | Full prod patterns without EKS cost | `terraform/ec2.tf` |
+| **Security Group** | Virtual firewall for EC2 | NodePort 30080/30300 locked to YOUR_IP/32 | Public IP without open-to-world apps | `terraform/ec2.tf` |
+| **SSM Session Manager** | Managed instance access without inbound ports | All remote ops — no SSH keys, no port 22 | Secure admin from any network | `terraform/ec2.tf`, `ssm-exec.ps1` |
+| **SSM Parameter Store** | Hierarchical config/secret storage | Mongo/Grafana passwords + IAM keys | Secrets never in Git or YAML | `terraform/secrets.tf`, `ssm-parameters.tf` |
+| **S3** | Object storage | Manifest delivery + Velero backups | Bypasses SSM 4096-char limit; DR target | `terraform/velero-s3.tf` |
+| **IAM** | Access management for AWS | 3 least-privilege principals (EC2 role, ESO user, Velero user) | Each component gets minimum permissions | `ec2.tf`, `ssm-parameters.tf`, `velero-s3.tf` |
+
+**SSM parameters created:**
+
+| Path | Content |
+|---|---|
+| `/k8AWS/mongo-username` | `admin` |
+| `/k8AWS/mongo-password` | random 24-char |
+| `/k8AWS/grafana-admin-username` | `admin` |
+| `/k8AWS/grafana-admin-password` | random 20-char |
+| `/k8AWS/eso-access-key-id` | ESO IAM key |
+| `/k8AWS/eso-secret-access-key` | ESO IAM secret |
+| `/k8AWS/velero-access-key-id` | Velero IAM key |
+| `/k8AWS/velero-secret-access-key` | Velero IAM secret |
+
+---
+
+### Layer 3 — Node bootstrap (cloud-init)
+
+| Step | Official reference | Why | File |
+|---|---|---|---|
+| Disable swap | [kubeadm install](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/) | kubelet requirement | `user-data/kubeadm-init.sh` |
+| containerd + SystemdCgroup | [containerd docs](https://containerd.io/docs/) | Kubernetes CRI (not Docker) | same |
+| kubeadm init 1.29 | [kubeadm init](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-init/) | Conformant cluster without managed EKS | same |
+| Calico v3.26 | [Calico install](https://docs.tigera.io/calico/latest/getting-started/kubernetes/) | CNI + NetworkPolicy enforcement | same |
+| local-path-provisioner | [GitHub](https://github.com/rancher/local-path-provisioner) | Dynamic PVC on node disk | same |
+| Remove control-plane taint | Single-node pattern | Schedule apps on only node | same |
+| `/var/lib/k8s-ready` marker | k8AWS convention | Signals deploy.ps1 bootstrap done | same |
+
+---
+
+### Layer 4 — Kubernetes platform add-ons
+
+| Component | Official definition | Why in k8AWS | Problem it solves | Install source |
+|---|---|---|---|---|
+| **metrics-server** | Cluster-wide resource usage aggregator | Powers `kubectl top` and HPA | `--kubelet-insecure-tls` patch for kubeadm self-signed kubelet certs | GitHub release v0.7.1 |
+| **cert-manager** | Automates TLS certificate management | Production TLS workflow demo | Self-signed ClusterIssuer for lab | GitHub release v1.14.5 |
+| **nginx-ingress** | Ingress controller using NGINX | L7 routing on NodePort 30080 | One entry for webapp + api — no ALB cost | ingress-nginx v1.11.1 baremetal |
+| **External Secrets Operator** | Syncs external secrets into K8s | SSM → native Kubernetes Secrets | Pods use `secretKeyRef` — no AWS SDK in apps | external-secrets v0.9.20 |
+
+---
+
+### Layer 5 — Secrets flow
+
+```mermaid
+flowchart LR
+    TF["Terraform random_password"] --> SSM["SSM SecureString"]
+    SSM --> ESO["External Secrets Operator"]
+    ESO --> KS["K8s Secrets"]
+    KS --> POD["Pod env vars"]
+```
+
+| Step | Why |
+|---|---|
+| Terraform generates passwords | Never in Git |
+| SSM stores encrypted | Central vault with audit trail |
+| ESO syncs to K8s | Standard pod secret consumption |
+| Files | `terraform/secrets.tf`, `manifests/secrets/external-secrets.yaml` |
+
+---
+
+### Layer 6 — Application workloads
+
+| Workload | Kind | Official definition | Why StatefulSet/Deployment | Problem it solves | File |
+|---|---|---|---|---|---|
+| **webapp** | Deployment + HPA | nginx HTTP server | Stateless — scales horizontally | Ingress + autoscaling demo | `microservices/webapp-deployment.yaml` |
+| **api** | Deployment | Python HTTP + pymongo | Stateless API layer | Proves api→mongo + secret injection | `microservices/api-deployment.yaml` |
+| **mongo** | StatefulSet + PVC | MongoDB document database | Stateful — needs stable ID + disk | Persistent data survives pod restart | `database/mongo-statefulset.yaml` |
+
+**Deploy order enforced:** mongo Ready → api → webapp → ingress (see `deploy.ps1`).
+
+---
+
+### Layer 7 — Networking and security
+
+| Component | Official definition | k8AWS use case | File |
+|---|---|---|---|
+| **NetworkPolicy** | K8s API for pod-level firewall rules | default-deny + explicit allow (api→mongo, ingress→webapp) | `networking/networkpolicy.yaml` |
+| **Ingress** | K8s API for L7 HTTP routing | `/webapp` → nginx, `/api` → Python | `networking/ingress-rules.yaml` |
+| **NodePort patch** | Exposes service on fixed host port | Pin HTTP to 30080 | `networking/nginx-ingress-nodeport.yaml` |
+| **Pod Security Admission** | Enforces Pod Security Standards | `baseline` on `app` namespace | `namespace/app-namespace.yaml` |
+| **PDB / Quota / LimitRange** | Reliability and resource governance | Prevent namespace exhaustion on 8 GiB node | `policy/guardrails.yaml` |
+
+**NetworkPolicy rules (6 total):**
+
+| Policy | Solves |
+|---|---|
+| `default-deny-all` | Block unexpected traffic |
+| `allow-dns-egress` | DNS resolution via kube-system |
+| `allow-ingress-to-webapp-api` | Only nginx namespace reaches frontends |
+| `allow-clients-to-mongo` | Only webapp + api reach mongo:27017 |
+| `allow-api-egress-mongo` | api egress restricted to mongo |
+| `allow-api-egress-https` | api initContainer pip install from PyPI |
+
+---
+
+### Layer 8 — Observability
+
+| Component | Official definition | Why | File |
+|---|---|---|---|
+| **Prometheus** | Time-series metrics collection | Scrapes annotated pods; feeds alerts | `observability/prometheus-grafana.yaml` |
+| **Alertmanager** | Alert routing and deduplication | Production alert pipeline pattern | `observability/alertmanager.yaml` |
+| **Grafana** | Metrics visualization dashboards | Human-readable health; password from SSM | `observability/prometheus-grafana.yaml` |
+| **Fluent Bit** | Log processor/forwarder DaemonSet | Container log collection pattern | `observability/fluent-bit.yaml` |
+
+Grafana exposed on **NodePort 30300** (direct, not via Ingress).
+
+---
+
+### Layer 9 — Backup (Velero)
+
+| Component | Official definition | Why | File |
+|---|---|---|---|
+| **Velero** | K8s backup/restore tool | Daily `app` namespace backup to S3 | `backup/velero-config.yaml` + `deploy.ps1` |
+| **S3 lifecycle** | Auto-expire old objects | 30-day retention — controls cost | `terraform/velero-s3.tf` |
+
+Schedule: `0 3 * * *` UTC — TTL 720h (30 days).
+
+---
+
+### Layer 10 — Automation scripts
+
+| Script | Purpose | When |
+|---|---|---|
+| `preflight.ps1` | Validate AWS creds, tools, free-tier | Before deploy |
+| `deploy.ps1` | Full pipeline: Terraform → K8s → Velero | Create lab |
+| `verify.ps1` | 35 checks (SSM + HTTP) | After deploy |
+| `destroy.ps1` | `terraform destroy` + verify | End of lab |
+| `logs.ps1` | Bootstrap/kubelet logs via SSM | Debug |
+| `helpers/ssm-exec.ps1` | SSM Run Command wrapper | Manual ops |
+
+---
+
+### Layer 11 — CI
+
+| Check | Tool | File |
+|---|---|---|
+| Terraform format + validate | `terraform fmt -check`, `validate` | `.github/workflows/ci.yaml` |
+| YAML lint | `yamllint` | same |
+
+CI does **not** deploy to AWS (no credentials in GitHub by default).
+
+---
+
+## Full manual build procedure (Phases A–K)
+
+Total time: **25–35 minutes**. Same outcome as `deploy.ps1`.
+
+### Phase A — Prepare local machine (5 min)
+
+```powershell
+cd c:\dev\k8AWS
+aws login
+aws sts get-caller-identity
+.\scripts\preflight.ps1
+```
+
+### Phase B — Create AWS infrastructure (5 min)
+
+```powershell
+cd terraform
+copy terraform.tfvars.example terraform.tfvars
+# Edit: allowed_ingress_cidr = "YOUR_PUBLIC_IP/32"
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+cd ..
+$ID     = terraform -chdir=terraform output -raw instance_id
+$IP     = terraform -chdir=terraform output -raw public_ip
+$BUCKET = terraform -chdir=terraform output -raw velero_bucket_name
+```
+
+**Created:** VPC, subnet, IGW, EC2, SG, IAM, SSM params, S3 bucket.
+
+### Phase C — Wait for Kubernetes bootstrap (10–15 min)
+
+```powershell
+aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" --region us-east-1
+.\scripts\helpers\ssm-exec.ps1 -InstanceId $ID -Command "test -f /var/lib/k8s-ready && echo READY"
+.\scripts\logs.ps1   # if stuck
+```
+
+**Created on node:** containerd, kubeadm, Calico, local-path storage.
+
+### Phase D — Sync manifests to S3 (1 min)
+
+```powershell
+aws s3 sync manifests "s3://$BUCKET/manifests/" --delete --region us-east-1
+```
+
+### Phase E — Install platform add-ons via SSM (5 min)
+
+```bash
+# Run on instance (deploy.ps1 automates all of this):
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.1/components.yaml
+kubectl patch deployment metrics-server -n kube-system --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/baremetal/deploy.yaml
+kubectl apply -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.20/deploy/crds/bundle.yaml
+kubectl apply -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.20/deploy/manifests/external-secrets.yaml
+```
+
+### Phase F — Secrets and namespaces (3 min)
+
+Apply via S3: `namespace/`, `policy/guardrails.yaml`, `secrets/external-secrets.yaml`, ESO creds secret. Wait for `mongo-credentials` and `grafana-admin-credentials` secrets.
+
+### Phase G — Observability + NetworkPolicies (3 min)
+
+Apply: `prometheus-grafana.yaml`, `alertmanager.yaml`, `fluent-bit.yaml`, `cert-manager-issuer.yaml`, **`networkpolicy.yaml` before apps**.
+
+### Phase H — Workloads (5 min)
+
+```bash
+# Order matters: mongo → api → webapp → ingress
+kubectl apply -f database/mongo-statefulset.yaml
+kubectl wait --for=condition=Ready pod -l app=mongo -n app --timeout=300s
+kubectl apply -f microservices/api-deployment.yaml
+kubectl apply -f microservices/webapp-deployment.yaml
+kubectl apply -f networking/ingress-rules.yaml
+```
+
+### Phase I — Velero (2 min, optional)
+
+```bash
+velero install --provider aws --bucket $BUCKET ...
+velero backup create app-manual-backup --include-namespaces app --wait
+```
+
+### Phase J — Verify from laptop
+
+```powershell
+.\scripts\verify.ps1
+start "http://$IP:30080/webapp"
+```
+
+### Phase K — Destroy
+
+```powershell
+.\scripts\destroy.ps1
+```
+
+---
+
+## Critical run checklist
+
+Verify these **before and during deploy** for a smooth run:
+
+| # | Check | How | Why it matters |
+|---|---|---|---|
+| 1 | AWS credentials valid | `aws sts get-caller-identity` | All scripts fail without this |
+| 2 | m7i-flex.large free-tier eligible | `preflight.ps1` | Wrong instance type = charges |
+| 3 | Region is us-east-1 | `terraform/variables.tf` default | Hard guardrail in Terraform |
+| 4 | `allowed_ingress_cidr` = YOUR_IP/32 | auto-set by deploy.ps1 | HTTP checks fail if IP wrong |
+| 5 | `enable_velero_bucket = true` | terraform.tfvars | Required for manifest S3 delivery |
+| 6 | SSM Online before K8s steps | deploy.ps1 waits 20 min | Cannot run kubectl until Online |
+| 7 | `/var/lib/k8s-ready` exists | deploy.ps1 waits 30 min | Bootstrap must finish first |
+| 8 | ExternalSecrets synced | deploy.ps1 waits 4 min | mongo/Grafana fail without secrets |
+| 9 | mongo Ready before api | deploy.ps1 enforces order | api returns 503 if mongo down |
+| 10 | NetworkPolicies before apps | deploy.ps1 order | Prevents restart surprises |
+| 11 | Same IP for verify HTTP checks | run verify from same network | SG blocks other IPs |
+| 12 | Run destroy.ps1 when done | manual | Stops $0.096/hr charges |
+
+**Honest expectation:** ~90–95% success on a fresh 2026 account with credits. Not 100% — upstream URLs and apt packages can change. No live E2E has been run until you execute deploy.
+
+---
 
 | Layer | Implementation |
 |---|---|
@@ -24,7 +374,7 @@
 | **CI** | GitHub Actions: `terraform validate` + yamllint |
 | **Verify** | 35 automated checks → `verify.log` |
 
-📖 **[Complete tech stack reference →](docs/TECH-STACK.md)** — official definitions, why each tool is used, and full manual build steps.
+See [Complete technology stack](#complete-technology-stack) above for all definitions and manual steps.
 
 ---
 
@@ -245,125 +595,6 @@ flowchart LR
 | Store | SSM Parameter Store | Encrypted at rest; audit trail; rotation-friendly |
 | Sync | External Secrets Operator | Kubernetes-native; pods consume standard Secrets |
 | Consume | Deployments / StatefulSets | `secretKeyRef` — same pattern as EKS + Secrets Manager |
-
----
-
-## Component reference — why and how
-
-Technical rationale for each layer. This is how a cloud/SRE team would justify the design.
-
-### Infrastructure (Terraform)
-
-| Resource | What it does | Why we use it |
-|---|---|---|
-| **VPC + public subnet** | Isolated network for the node | Required for security groups, routing, and future multi-AZ expansion |
-| **Internet Gateway** | Bidirectional internet for public subnet | Node pulls container images and packages; no NAT saves ~$32/mo |
-| **EC2 m7i-flex.large** | 2 vCPU, 8 GiB RAM | Free-tier eligible on 2026 accounts; minimum viable for full stack |
-| **IAM instance profile** | `AmazonSSMManagedInstanceCore` + SSM read + S3 read | SSM access without SSH; ESO can read params; EC2 pulls manifests from S3 |
-| **SSM parameters** | Mongo/Grafana passwords, ESO/Velero IAM keys | Central secret store; never committed to Git |
-| **S3 bucket** | Velero backups + manifest staging | Durable object storage within 5 GB free tier; 30-day lifecycle |
-
-### Bootstrap (cloud-init / user-data)
-
-| Step | What it does | Why we use it |
-|---|---|---|
-| **swap off** | Disables swap | kubelet requirement — swap causes pod scheduling issues |
-| **containerd** | Container runtime (CRI) | Kubernetes-native CRI; lighter than Docker CE for nodes |
-| **kubeadm init** | Installs control plane + kubelet | Standard way to build conformant clusters without managed EKS cost |
-| **Calico** | CNI + NetworkPolicy enforcement | Industry-standard overlay; supports `NetworkPolicy` (Flannel alone does not) |
-| **local-path-provisioner** | Dynamic PV on node disk | Gives mongo a real PVC without EBS CSI complexity on free tier |
-| **Taint removal** | Schedules workloads on control-plane | Single-node lab — no separate worker EC2 |
-
-### Platform add-ons
-
-| Component | What it does | Why we use it |
-|---|---|---|
-| **metrics-server** | Aggregates pod/node CPU/memory | Required for `kubectl top` and HPA |
-| **nginx-ingress** | L7 routing by URL path | One entry point for webapp + api without multiple Load Balancers |
-| **cert-manager** | TLS certificate automation | Production pattern; self-signed issuer for lab (swap for Let's Encrypt with real DNS) |
-| **External Secrets** | Syncs SSM → K8s Secrets | Same pattern as AWS Secrets Manager + ESO on EKS |
-| **Velero** | Cluster backup to S3 | Disaster recovery for app namespace; scheduled daily at 03:00 UTC |
-
-### Application layer
-
-| Component | What it does | Why we use it |
-|---|---|---|
-| **webapp (nginx)** | Static front-end + HPA | Demonstrates stateless scaling and ingress routing |
-| **api (Python/pymongo)** | Health endpoint with Mongo ping | Proves service-to-service connectivity and secret injection |
-| **mongo StatefulSet** | Persistent database with PVC | Stateful workloads need stable identity + storage — Deployment is wrong here |
-| **NetworkPolicies** | default-deny + explicit allow | Zero-trust pod networking — api only talks to mongo on 27017, ingress only from nginx namespace |
-
-### Observability
-
-| Component | What it does | Why we use it |
-|---|---|---|
-| **Prometheus** | Scrapes pod metrics via annotations | Industry-standard metrics; feeds alerts and Grafana |
-| **Alertmanager** | Routes alert notifications | Production pattern — rules defined even if notifications go nowhere in lab |
-| **Grafana** | Dashboards + login | Visual confirmation cluster is healthy; password from SSM |
-| **Fluent Bit** | Log collection DaemonSet | Same agent pattern used on EKS Fargate / CloudWatch pipelines |
-
-### Guardrails
-
-| Resource | What it does | Why we use it |
-|---|---|---|
-| **PodDisruptionBudget** | minAvailable: 1 | Prevents voluntary disruption from draining all replicas (meaningful when scaled) |
-| **ResourceQuota** | Caps CPU/memory/pods in `app` | Prevents one namespace from exhausting single-node capacity |
-| **LimitRange** | Default container requests/limits | Ensures every pod has resource bounds — required for fair scheduling |
-| **PSA baseline** | Pod Security Admission on `app` ns | Blocks privileged pods; aligns with production cluster policy |
-
----
-
-## Manual step-by-step (if you prefer not to use deploy.ps1)
-
-For learning or debugging — same outcome as the automated script.
-
-### Phase 1 — AWS infrastructure
-
-```powershell
-cd c:\dev\k8AWS\terraform
-copy terraform.tfvars.example terraform.tfvars   # edit allowed_ingress_cidr to YOUR_IP/32
-terraform init
-terraform plan
-terraform apply
-terraform output
-```
-
-### Phase 2 — Wait for cluster bootstrap
-
-```powershell
-cd c:\dev\k8AWS
-$ID = terraform -chdir=terraform output -raw instance_id
-
-# Wait until SSM is Online (repeat until Online)
-aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" --region us-east-1
-
-# Wait until kubeadm finished
-.\scripts\helpers\ssm-exec.ps1 -Command "test -f /var/lib/k8s-ready && echo READY"
-```
-
-### Phase 3 — Upload manifests and apply platform stack
-
-```powershell
-$BUCKET = terraform -chdir=terraform output -raw velero_bucket_name
-aws s3 sync manifests "s3://$BUCKET/manifests/" --delete --region us-east-1
-
-# On the instance via SSM — install add-ons (metrics-server, cert-manager, ingress, ESO)
-# Full command sequence is in scripts/deploy.ps1 — run that script instead for reliability.
-.\scripts\deploy.ps1
-```
-
-### Phase 4 — Verify and use
-
-```powershell
-.\scripts\verify.ps1
-start "http://$(terraform -chdir=terraform output -raw public_ip):30080/webapp"
-```
-
-### Phase 5 — Destroy
-
-```powershell
-.\scripts\destroy.ps1
-```
 
 ---
 
@@ -669,7 +900,7 @@ Expert assessment of this repository layout against production SRE standards.
 | **Separation of concerns** | ✅ Good | `terraform/` (infra), `manifests/` (K8s), `scripts/` (orchestration) — clean boundaries |
 | **No secrets in Git** | ✅ Good | `.gitignore` blocks tfvars/state; passwords in SSM only |
 | **IaC for all AWS resources** | ✅ Good | Nothing requires manual console steps |
-| **Destroy path exists** | ✅ Good | `destroy.ps1` + Terraform default tags `AutoDestroy=true` |
+| **Destroy path exists** | ✅ Good | `destroy.ps1` + S3 `force_destroy` + Terraform default tags |
 | **Remote access model** | ✅ Good | SSM-only — no SSH keys, no port 22 |
 | **Network zero-trust** | ✅ Good | Calico NetworkPolicy default-deny + SG IP lockdown |
 | **Resource governance** | ✅ Good | ResourceQuota, LimitRange, PDB, PSA baseline |
@@ -726,4 +957,4 @@ aws login
 .\scripts\destroy.ps1   # when finished
 ```
 
-Full technical reference: **[docs/TECH-STACK.md](docs/TECH-STACK.md)**
+Full technical reference (standalone copy): **[docs/TECH-STACK.md](docs/TECH-STACK.md)** — identical content also in this README above.

@@ -1,8 +1,8 @@
 # k8AWS — Complete Technology Stack Reference
 
-This document explains **every technology** in the k8AWS project: official definitions, why it was chosen, the specific problem it solves here, which files implement it, and **exact steps** to create or configure it.
+> **Note:** This file is a standalone copy. The full content is also in the [main README](../README.md#complete-technology-stack) — the README is the single source of truth.
 
-For diagrams and quick commands, see the [main README](../README.md).
+This document explains **every technology** in the k8AWS project: official definitions, why it was chosen, the specific problem it solves here, which files implement it, and **exact steps** to create or configure it.
 
 ---
 

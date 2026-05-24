@@ -5,6 +5,7 @@
 tfplan
 terraform.tfvars
 *.tfvars
+!terraform.tfvars.example
 
 # Secrets and credentials
 *.pem

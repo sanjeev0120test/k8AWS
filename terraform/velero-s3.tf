@@ -2,6 +2,8 @@ resource "aws_s3_bucket" "velero" {
   count  = var.enable_velero_bucket ? 1 : 0
   bucket = "${lower(var.project_name)}-velero-${data.aws_caller_identity.current.account_id}"
 
+  force_destroy = true
+
   tags = {
     Name = "${var.project_name}-velero-backups"
   }
