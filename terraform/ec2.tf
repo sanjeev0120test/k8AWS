@@ -109,7 +109,7 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
 }
 
 resource "aws_iam_role_policy" "ec2_ssm_read" {
-  name = "${var.project_name}-ec2-ssm-read"
+  name = "${var.project_name}-ec2-node-policy"
   role = aws_iam_role.ec2_ssm.id
 
   policy = jsonencode({
@@ -123,17 +123,28 @@ resource "aws_iam_role_policy" "ec2_ssm_read" {
           "ssm:GetParametersByPath"
         ]
         Resource = "arn:aws:ssm:${var.aws_region}:*:parameter/${var.project_name}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+        Resource = aws_kms_key.ssm.arn
       }
       ], var.enable_velero_bucket ? [
       {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
-          "s3:ListBucket"
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
         ]
         Resource = [
           aws_s3_bucket.velero[0].arn,
-          "${aws_s3_bucket.velero[0].arn}/manifests/*"
+          "${aws_s3_bucket.velero[0].arn}/*"
         ]
       }
     ] : [])
@@ -162,7 +173,7 @@ resource "aws_instance" "k8s_node" {
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
-    http_put_response_hop_limit = 2
+    http_put_response_hop_limit = 2 # allows pods (ESO, Velero) to use instance profile via IMDS
   }
 
   credit_specification {

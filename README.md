@@ -136,20 +136,16 @@ Every technology below includes: **official definition**, **why we use it**, **t
 #### SSM Parameter Store
 - **Definition:** Encrypted hierarchical secret/config storage.
 - **Real use case:** Same pattern as AWS Secrets Manager + EKS External Secrets in production.
-- **Problem solved:** Mongo/Grafana passwords and IAM keys never touch Git or Kubernetes YAML.
-- **Parameters:** `/k8AWS/mongo-password`, `/k8AWS/grafana-admin-password`, ESO/Velero IAM keys (see table below).
-- **Files:** `terraform/secrets.tf`, `terraform/ssm-parameters.tf`, `terraform/velero-s3.tf`
+- **Problem solved:** Mongo/Grafana passwords never touch Git or Kubernetes YAML. Encrypted with **customer-managed KMS** (key rotation enabled).
+- **Parameters:** app secrets + Velero bucket name (see table below).
+- **Files:** `terraform/secrets.tf`, `terraform/kms.tf`, `terraform/velero-s3.tf`
 
 | Path | Content |
 |---|---|
 | `/k8AWS/mongo-username` | `admin` |
-| `/k8AWS/mongo-password` | random 24-char |
+| `/k8AWS/mongo-password` | random 24-char (KMS-encrypted SecureString) |
 | `/k8AWS/grafana-admin-username` | `admin` |
-| `/k8AWS/grafana-admin-password` | random 20-char |
-| `/k8AWS/eso-access-key-id` | ESO IAM key |
-| `/k8AWS/eso-secret-access-key` | ESO IAM secret |
-| `/k8AWS/velero-access-key-id` | Velero IAM key |
-| `/k8AWS/velero-secret-access-key` | Velero IAM secret |
+| `/k8AWS/grafana-admin-password` | random 20-char (KMS-encrypted SecureString) |
 | `/k8AWS/velero-bucket` | S3 bucket name |
 
 #### S3
@@ -157,14 +153,13 @@ Every technology below includes: **official definition**, **why we use it**, **t
 - **Real use case (1):** Manifest delivery — EC2 pulls YAML from `s3://k8aws-velero-<ACCOUNT>/manifests/`.
 - **Real use case (2):** Velero backup target with 30-day lifecycle expiration.
 - **Problem solved:** SSM Run Command **4096-character limit** breaks large manifest apply; S3 is the production-style workaround.
+- **Compliance:** Bucket policy **denies non-TLS** access; SSE-S3 encryption; public access blocked.
 - **Files:** `terraform/velero-s3.tf` (`force_destroy = true` for clean teardown), `manifests/backup/velero-config.yaml`
 
-#### IAM (least privilege)
+#### IAM (least privilege — no static access keys)
 | Principal | Permissions | Problem solved |
 |---|---|---|
-| EC2 instance role | SSM core + read `/k8AWS/*` SSM + read S3 manifests | Node ops without static keys on disk |
-| IAM user `k8AWS-eso-reader` | `ssm:GetParameter` on `/k8AWS/*` | ESO reads only what it needs |
-| IAM user `k8AWS-velero` | S3 read/write on Velero bucket | Backup isolation from ESO |
+| EC2 instance role (single) | SSM core + SSM read `/k8AWS/*` + KMS decrypt + S3 full on Velero bucket | ESO, Velero, and manifest sync use **instance profile via IMDS** — no long-lived keys in SSM or K8s |
 
 ---
 
@@ -217,9 +212,9 @@ flowchart LR
 | `ExternalSecret` `mongo-credentials` | Mongo root user/pass in `app` namespace |
 | `ExternalSecret` `grafana-admin-credentials` | Grafana login in `observability` namespace |
 
-**Real use case:** Rotate password in SSM → ESO refreshes K8s Secret → restart pod. No Terraform re-apply for app secrets.
+**Real use case:** Rotate password in SSM → ESO refreshes K8s Secret → restart pod. ESO authenticates via **EC2 instance profile** (no static AWS keys in cluster).
 
-**Files:** `terraform/secrets.tf`, `manifests/secrets/external-secrets.yaml`
+**Files:** `terraform/secrets.tf`, `terraform/kms.tf`, `manifests/secrets/external-secrets.yaml`
 
 ---
 
@@ -652,7 +647,7 @@ flowchart LR
     ESO --> KS["Kubernetes Secrets<br/>mongo-credentials<br/>grafana-admin-credentials"]
     KS --> POD["App pods<br/>env / volumeMount"]
 
-    IAM["IAM user k8AWS-eso-reader<br/>ssm:GetParameter only"] --> ESO
+    EC2["EC2 instance role<br/>IMDS hop limit 2"] --> ESO
 ```
 
 | Step | Component | Why |
@@ -770,7 +765,7 @@ Username: `admin`
 .\scripts\destroy.ps1
 ```
 
-Type `destroy` when prompted. This removes EC2, VPC, S3 bucket, SSM parameters, and IAM users — stopping ~$0.096/hr compute charges.
+Type `destroy` when prompted. This removes EC2, VPC, S3 bucket, SSM parameters, and KMS key — stopping ~$0.096/hr compute charges.
 
 Non-interactive destroy:
 
@@ -893,8 +888,8 @@ Deploy continues. Cluster works without Velero. Re-run Velero steps manually via
 |---|---|
 | Will this work **100%** guaranteed? | **No** — not without a live end-to-end run on your account. Upstream URLs (Calico, ingress-nginx, ESO, apt k8s packages) can change; free-tier eligibility varies by account age. |
 | Expected success rate after fixes | **~90–95%** on a fresh 2026 account with valid credits and stable internet |
-| Structural limits (by design) | Single-node (no HA), `--kubelet-insecure-tls`, static IAM keys for ESO/Velero, self-signed TLS only, 8 GB RAM ceiling |
-| What would improve it further | Live E2E test in CI, IRSA instead of static keys, pre-built api image (no pip at runtime), second worker node, real DNS + Let's Encrypt |
+| Structural limits (by design) | Single-node (no HA), `--kubelet-insecure-tls`, self-signed TLS only, 8 GB RAM ceiling |
+| What would improve it further | Live E2E test in CI, EKS IRSA per workload, pre-built api image, second worker node, real DNS + Let's Encrypt |
 
 ---
 
@@ -916,7 +911,7 @@ k8AWS/
 │   ├── vpc.tf
 │   ├── ec2.tf
 │   ├── secrets.tf
-│   ├── ssm-parameters.tf
+│   ├── kms.tf              # Customer-managed KMS for SSM SecureStrings
 │   ├── velero-s3.tf
 │   ├── variables.tf
 │   ├── outputs.tf
@@ -972,6 +967,9 @@ Expert assessment of this repository layout against production SRE standards.
 | **CI validation** | ✅ Good | Terraform fmt/validate + yamllint on every push |
 | **Cost guardrails** | ✅ Good | No NAT, no ALB, instance type/region locked in Terraform |
 | **Manifest delivery** | ✅ Good | S3 sync avoids SSM payload limits — production pattern |
+| **No static IAM access keys** | ✅ Good | ESO + Velero use EC2 instance profile (IMDS); keys removed |
+| **KMS encryption** | ✅ Good | Customer-managed KMS for SecureString params; rotation enabled |
+| **S3 TLS enforcement** | ✅ Good | Bucket policy denies insecure transport |
 
 ### Known gaps (acceptable for free-tier lab, fix for real production)
 
@@ -979,7 +977,7 @@ Expert assessment of this repository layout against production SRE standards.
 |---|---|---|
 | Single-node cluster | High for prod | Add worker node + remove control-plane taint |
 | Local Terraform state | Medium | Add S3 backend + DynamoDB lock for team use |
-| Static IAM keys for ESO/Velero | Medium | Use IRSA (EKS) or instance profile with scoped policies |
+| Instance profile shared by all pods | Low | On EKS migrate to IRSA per service account |
 | `--kubelet-insecure-tls` | Medium | Install proper kubelet serving certs (kubeadm certs pattern) |
 | No GitOps controller | Low | Add ArgoCD/Flux — currently script-driven apply |
 | api pip install at runtime | Low | Build custom container image with pymongo pre-baked |
@@ -995,7 +993,7 @@ Expert assessment of this repository layout against production SRE standards.
 | Free-tier lab / learning | **9/10** | Complete, automated, destroyable |
 | Small-org single-node patterns | **8.5/10** | Real production patterns at minimal scale |
 | Multi-node HA production | **4/10** | By design — one instance |
-| Enterprise compliance | **6/10** | Good foundations; static keys and single node limit audit score |
+| Enterprise compliance | **8/10** | KMS + no static keys + S3 TLS; single-node still limits full HA audit |
 
 **Verdict:** Folder structure and component choices are **correct and production-pattern-aligned** for a single-node AWS lab. The layout would scale to a multi-node/EKS migration by moving `manifests/` into GitOps and replacing kubeadm bootstrap with managed node groups — without restructuring the repo.
 

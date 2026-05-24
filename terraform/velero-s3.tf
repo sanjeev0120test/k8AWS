@@ -57,56 +57,30 @@ resource "aws_s3_bucket_lifecycle_configuration" "velero" {
 
 data "aws_caller_identity" "current" {}
 
-resource "aws_iam_user" "velero" {
-  count = var.enable_velero_bucket ? 1 : 0
-  name  = "${var.project_name}-velero"
-}
-
-resource "aws_iam_user_policy" "velero_s3" {
-  count = var.enable_velero_bucket ? 1 : 0
-  name  = "${var.project_name}-velero-s3"
-  user  = aws_iam_user.velero[0].name
+resource "aws_s3_bucket_policy" "velero_tls" {
+  count  = var.enable_velero_bucket ? 1 : 0
+  bucket = aws_s3_bucket.velero[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:DeleteObject",
-          "s3:ListBucket",
-          "s3:GetBucketLocation"
-        ]
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
         Resource = [
           aws_s3_bucket.velero[0].arn,
           "${aws_s3_bucket.velero[0].arn}/*"
         ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
       }
     ]
   })
-}
-
-resource "aws_iam_access_key" "velero" {
-  count = var.enable_velero_bucket ? 1 : 0
-  user  = aws_iam_user.velero[0].name
-}
-
-resource "aws_ssm_parameter" "velero_access_key_id" {
-  count       = var.enable_velero_bucket ? 1 : 0
-  name        = "/${var.project_name}/velero-access-key-id"
-  description = "Velero AWS access key ID"
-  type        = "SecureString"
-  value       = aws_iam_access_key.velero[0].id
-}
-
-resource "aws_ssm_parameter" "velero_secret_access_key" {
-  count       = var.enable_velero_bucket ? 1 : 0
-  name        = "/${var.project_name}/velero-secret-access-key"
-  description = "Velero AWS secret access key"
-  type        = "SecureString"
-  value       = aws_iam_access_key.velero[0].secret
 }
 
 resource "aws_ssm_parameter" "velero_bucket" {

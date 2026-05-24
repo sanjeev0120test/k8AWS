@@ -80,22 +80,6 @@ function Apply-ManifestsOnInstance($instanceId, $bucket, [string[]]$relativePath
     }
 }
 
-function New-EsoSecretManifest($keyId, $secretKey) {
-    $b64Key = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($keyId))
-    $b64Secret = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($secretKey))
-    return @"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: eso-aws-credentials
-  namespace: external-secrets
-type: Opaque
-data:
-  access-key-id: $b64Key
-  secret-access-key: $b64Secret
-"@
-}
-
 Write-Step "k8AWS Production Deploy"
 & (Join-Path $RootDir (Join-Path "scripts" "preflight.ps1"))
 if ($LASTEXITCODE -ne 0) { throw "Preflight failed" }
@@ -149,15 +133,6 @@ Invoke-Ssm $instanceId "kubectl apply -f $EsoCrdsUrl" 300
 Invoke-Ssm $instanceId "kubectl apply -f $EsoManifestUrl" 300
 Invoke-Ssm $instanceId "kubectl rollout status deployment/external-secrets -n external-secrets --timeout=240s" 240
 
-Write-Step "ESO credentials secret (safe base64 YAML)"
-$esoKeyId = aws ssm get-parameter --name "/$ProjectName/eso-access-key-id" --with-decryption --region $Region --query "Parameter.Value" --output text
-$esoSecret = aws ssm get-parameter --name "/$ProjectName/eso-secret-access-key" --with-decryption --region $Region --query "Parameter.Value" --output text
-$esoYaml = New-EsoSecretManifest $esoKeyId $esoSecret
-$esoTemp = Join-Path $env:TEMP "eso-secret.yaml"
-$esoYaml | Set-Content -Path $esoTemp -Encoding UTF8
-aws s3 cp $esoTemp "s3://$veleroBucket/manifests/bootstrap/eso-secret.yaml" --region $Region
-Invoke-Ssm $instanceId "aws s3 cp s3://$veleroBucket/manifests/bootstrap/eso-secret.yaml /tmp/eso-secret.yaml --region $Region && kubectl apply -f /tmp/eso-secret.yaml" 120
-
 $manifestSequence = @(
     "namespace/platform-namespaces.yaml",
     "namespace/app-namespace.yaml",
@@ -197,15 +172,8 @@ Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/ingress-rules.
 
 Write-Step "Velero backup (optional — continues on failure)"
 try {
-    $veleroKey = aws ssm get-parameter --name "/$ProjectName/velero-access-key-id" --with-decryption --region $Region --query "Parameter.Value" --output text
-    $veleroSecretKey = aws ssm get-parameter --name "/$ProjectName/velero-secret-access-key" --with-decryption --region $Region --query "Parameter.Value" --output text
-    $cred = "[default]`naws_access_key_id=$veleroKey`naws_secret_access_key=$veleroSecretKey"
-    $credTemp = Join-Path $env:TEMP "velero-credentials"
-    $cred | Set-Content -Path $credTemp -Encoding ASCII -NoNewline
-    aws s3 cp $credTemp "s3://$veleroBucket/manifests/bootstrap/velero-credentials" --region $Region
     Invoke-Ssm $instanceId "curl -fsSL https://github.com/vmware-tanzu/velero/releases/download/$VeleroVersion/velero-${VeleroVersion}-linux-amd64.tar.gz | tar -xz && install velero-${VeleroVersion}-linux-amd64/velero /usr/local/bin/velero" 300
-    Invoke-Ssm $instanceId "aws s3 cp s3://$veleroBucket/manifests/bootstrap/velero-credentials /tmp/velero-creds --region $Region && chmod 600 /tmp/velero-creds" 60
-    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --secret-file /tmp/velero-creds --backup-location-config region=$Region --wait" 600
+    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --backup-location-config region=$Region --wait" 600
     $veleroCfg = (Get-Content (Join-Path $ManifestsDir (Join-Path "backup" "velero-config.yaml")) -Raw).Replace("PLACEHOLDER_BUCKET", $veleroBucket)
     $veleroCfgTemp = Join-Path $env:TEMP "velero-config.yaml"
     $veleroCfg | Set-Content $veleroCfgTemp -Encoding UTF8

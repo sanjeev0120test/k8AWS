@@ -13,6 +13,7 @@ resource "aws_ssm_parameter" "mongo_password" {
   description = "MongoDB root password"
   type        = "SecureString"
   value       = random_password.mongo.result
+  key_id      = aws_kms_key.ssm.arn
 
   tags = {
     Name = "${var.project_name}-mongo-password"
@@ -35,6 +36,7 @@ resource "aws_ssm_parameter" "grafana_password" {
   description = "Grafana admin password"
   type        = "SecureString"
   value       = random_password.grafana.result
+  key_id      = aws_kms_key.ssm.arn
 
   tags = {
     Name = "${var.project_name}-grafana-password"

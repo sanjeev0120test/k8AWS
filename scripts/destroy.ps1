@@ -7,7 +7,7 @@ $Region = "us-east-1"
 $ProjectName = "k8AWS"
 
 Write-Host "`nk8AWS — Destroy all resources`n" -ForegroundColor Yellow
-Write-Host "This removes EC2, VPC, SSM parameters, and IAM resources."
+Write-Host "This removes EC2, VPC, SSM parameters, KMS key, and S3 bucket."
 Write-Host "Estimated savings: ~`$0.096/hr compute credits.`n"
 
 if ($env:K8AWS_AUTO_APPROVE -ne "true") {
