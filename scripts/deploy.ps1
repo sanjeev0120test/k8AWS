@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $PSScriptRoot
 $TerraformDir = Join-Path $RootDir "terraform"
 $ManifestsDir = Join-Path $RootDir "manifests"
-$SsmExec = Join-Path $RootDir "scripts\helpers\ssm-exec.ps1"
+$SsmExec = Join-Path $RootDir (Join-Path "scripts" (Join-Path "helpers" "ssm-exec.ps1"))
 $Region = "us-east-1"
 $ProjectName = "k8AWS"
 
@@ -97,7 +97,7 @@ data:
 }
 
 Write-Step "k8AWS Production Deploy"
-& (Join-Path $RootDir "scripts\preflight.ps1")
+& (Join-Path $RootDir (Join-Path "scripts" "preflight.ps1"))
 if ($LASTEXITCODE -ne 0) { throw "Preflight failed" }
 
 Ensure-TerraformVars
@@ -138,7 +138,7 @@ Write-Step "Platform: nginx-ingress"
 Invoke-Ssm $instanceId "kubectl apply -f $NginxIngressUrl" 300
 Start-Sleep -Seconds 25
 if ($veleroBucket) {
-    Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking\nginx-ingress-nodeport.yaml")
+    Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/nginx-ingress-nodeport.yaml")
 } else {
     throw "Velero bucket required for manifest delivery — enable_velero_bucket must be true"
 }
@@ -159,12 +159,12 @@ aws s3 cp $esoTemp "s3://$veleroBucket/manifests/bootstrap/eso-secret.yaml" --re
 Invoke-Ssm $instanceId "aws s3 cp s3://$veleroBucket/manifests/bootstrap/eso-secret.yaml /tmp/eso-secret.yaml --region $Region && kubectl apply -f /tmp/eso-secret.yaml" 120
 
 $manifestSequence = @(
-    "namespace\platform-namespaces.yaml",
-    "namespace\app-namespace.yaml",
-    "policy\guardrails.yaml",
-    "observability\alertmanager.yaml",
-    "observability\fluent-bit.yaml",
-    "secrets\external-secrets.yaml"
+    "namespace/platform-namespaces.yaml",
+    "namespace/app-namespace.yaml",
+    "policy/guardrails.yaml",
+    "observability/alertmanager.yaml",
+    "observability/fluent-bit.yaml",
+    "secrets/external-secrets.yaml"
 )
 Apply-ManifestsOnInstance $instanceId $veleroBucket $manifestSequence
 
@@ -172,28 +172,28 @@ Write-Step "Waiting for ExternalSecrets sync"
 Invoke-Ssm $instanceId 'for i in $(seq 1 40); do kubectl get secret mongo-credentials -n app >/dev/null 2>&1 && kubectl get secret grafana-admin-credentials -n observability >/dev/null 2>&1 && exit 0; sleep 6; done; kubectl describe externalsecret -A; exit 1' 300
 
 Apply-ManifestsOnInstance $instanceId $veleroBucket @(
-    "observability\prometheus-grafana.yaml",
-    "security\cert-manager-issuer.yaml"
+    "observability/prometheus-grafana.yaml",
+    "security/cert-manager-issuer.yaml"
 )
 
 Write-Step "Network policies (before workloads — avoids restart surprises)"
-Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking\networkpolicy.yaml")
+Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/networkpolicy.yaml")
 
 Write-Step "Database first (mongo before api)"
-Apply-ManifestsOnInstance $instanceId $veleroBucket @("database\mongo-statefulset.yaml")
+Apply-ManifestsOnInstance $instanceId $veleroBucket @("database/mongo-statefulset.yaml")
 Invoke-Ssm $instanceId "kubectl rollout status statefulset/mongo -n app --timeout=420s" 420
 Invoke-Ssm $instanceId "kubectl wait --for=condition=Ready pod -l app=mongo -n app --timeout=300s" 300
 
 Write-Step "Applications"
 Apply-ManifestsOnInstance $instanceId $veleroBucket @(
-    "microservices\api-deployment.yaml",
-    "microservices\webapp-deployment.yaml"
+    "microservices/api-deployment.yaml",
+    "microservices/webapp-deployment.yaml"
 )
 Invoke-Ssm $instanceId "kubectl rollout status deployment/api -n app --timeout=420s" 420
 Invoke-Ssm $instanceId "kubectl rollout status deployment/webapp -n app --timeout=300s" 300
 
 Write-Step "Ingress rules"
-Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking\ingress-rules.yaml")
+Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/ingress-rules.yaml")
 
 Write-Step "Velero backup (optional — continues on failure)"
 try {
@@ -206,7 +206,7 @@ try {
     Invoke-Ssm $instanceId "curl -fsSL https://github.com/vmware-tanzu/velero/releases/download/$VeleroVersion/velero-${VeleroVersion}-linux-amd64.tar.gz | tar -xz && install velero-${VeleroVersion}-linux-amd64/velero /usr/local/bin/velero" 300
     Invoke-Ssm $instanceId "aws s3 cp s3://$veleroBucket/manifests/bootstrap/velero-credentials /tmp/velero-creds --region $Region && chmod 600 /tmp/velero-creds" 60
     Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --secret-file /tmp/velero-creds --backup-location-config region=$Region --wait" 600
-    $veleroCfg = (Get-Content (Join-Path $ManifestsDir "backup\velero-config.yaml") -Raw).Replace("PLACEHOLDER_BUCKET", $veleroBucket)
+    $veleroCfg = (Get-Content (Join-Path $ManifestsDir (Join-Path "backup" "velero-config.yaml")) -Raw).Replace("PLACEHOLDER_BUCKET", $veleroBucket)
     $veleroCfgTemp = Join-Path $env:TEMP "velero-config.yaml"
     $veleroCfg | Set-Content $veleroCfgTemp -Encoding UTF8
     aws s3 cp $veleroCfgTemp "s3://$veleroBucket/manifests/bootstrap/velero-config.yaml" --region $Region

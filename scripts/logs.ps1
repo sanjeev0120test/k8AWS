@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $RootDir = Split-Path -Parent $PSScriptRoot
 $TerraformDir = Join-Path $RootDir "terraform"
-$SsmExec = Join-Path $RootDir "scripts\helpers\ssm-exec.ps1"
+$SsmExec = Join-Path $RootDir (Join-Path "scripts" (Join-Path "helpers" "ssm-exec.ps1"))
 $Region = "us-east-1"
 
 function Get-TfOutput($name) {

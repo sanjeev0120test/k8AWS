@@ -28,7 +28,8 @@
 | Section | What it covers |
 |---|---|
 | [Real-world problems](#real-world-problems-this-lab-solves) | What this project fixes |
-| [Start now](#start-now-immediate-steps) | 4 commands to deploy |
+| [Start now](#start-now-immediate-steps) | 4 commands to deploy (Windows) |
+| [macOS](#macos--critical-steps-to-run-this-project) | Critical Mac setup (`pwsh`) |
 | [Complete technology stack](#complete-technology-stack) | All 27 technologies — definitions, why, use cases |
 | [Full manual build](#full-manual-build-procedure-phases-ak) | Phase-by-phase create guide |
 | [Critical run checklist](#critical-run-checklist) | Pre-flight checks for smooth deploy |
@@ -1017,3 +1018,77 @@ aws login
 # Browser: http://<PUBLIC_IP>:30080/webapp
 .\scripts\destroy.ps1   # when finished
 ```
+
+---
+
+## macOS — critical steps to run this project
+
+The AWS/Terraform/Kubernetes stack is OS-neutral. Only the **local orchestration scripts** need PowerShell. No changes to Terraform or manifests are required on Mac.
+
+### Why Mac is different
+
+| Item | Windows | macOS |
+|---|---|---|
+| Shell scripts | `.\scripts\deploy.ps1` | `pwsh ./scripts/deploy.ps1` |
+| PowerShell | Built-in (5.1+) | Install **PowerShell 7+** (`pwsh`) — not pre-installed |
+| Copy tfvars | `copy a b` | `cp a b` |
+| Open browser | `start http://...` | `open http://...` |
+
+### Step 1 — Install required tools (one-time)
+
+```bash
+brew install awscli terraform powershell
+```
+
+**Why:** `aws` and `terraform` provision AWS; `pwsh` runs the deploy/verify/destroy scripts (there are no bash equivalents in this repo).
+
+Verify:
+
+```bash
+aws --version
+terraform version
+pwsh --version
+```
+
+### Step 2 — Authenticate to AWS
+
+```bash
+aws login
+aws sts get-caller-identity
+```
+
+**Why:** Same as Windows — all scripts call AWS APIs; without valid creds nothing runs.
+
+### Step 3 — Run the pipeline with `pwsh`
+
+```bash
+cd ~/path/to/k8AWS
+pwsh ./scripts/preflight.ps1
+pwsh ./scripts/deploy.ps1
+pwsh ./scripts/verify.ps1
+pwsh ./scripts/destroy.ps1   # when finished
+```
+
+**Why:** Scripts are `.ps1` only; `pwsh` is the cross-platform PowerShell runtime on Mac.
+
+### Step 4 — Optional manual tfvars (if not auto-created)
+
+```bash
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Edit allowed_ingress_cidr to YOUR_PUBLIC_IP/32
+```
+
+**Why:** Security group only allows your IP on NodePorts 30080/30300 — HTTP checks fail from other networks.
+
+### What you do NOT need on Mac
+
+- No changes to `terraform/`, `manifests/`, or EC2 bootstrap
+- No Docker Desktop or local Kubernetes (cluster runs on EC2)
+- No SSH keys (SSM Session Manager only)
+
+### If something fails on Mac
+
+1. Confirm you used **`pwsh`**, not plain `bash`, to run scripts
+2. Confirm tools are in PATH: `which aws terraform pwsh`
+3. Run `pwsh ./scripts/logs.ps1` if bootstrap hangs
+4. HTTP verify fails if your public IP changed — update `allowed_ingress_cidr` and `terraform apply`
