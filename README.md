@@ -292,6 +292,25 @@ GitHub Actions (`.github/workflows/ci.yaml`): `terraform fmt -check`, `terraform
 
 ---
 
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 203326" src="https://github.com/user-attachments/assets/5e475fac-8a79-4821-acea-0eb9a89d2789" />
+<img width="1895" height="1014" alt="Screenshot 2026-05-30 213912" src="https://github.com/user-attachments/assets/584586c2-3c53-41f9-b440-961deecb2a4a" />
+<img width="1888" height="996" alt="Screenshot 2026-05-30 213953" src="https://github.com/user-attachments/assets/c989f29a-30cf-4462-b8cc-d7396d57f001" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214032" src="https://github.com/user-attachments/assets/f1dc38ba-4df5-4b85-972a-6376055ffe93" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214049" src="https://github.com/user-attachments/assets/84aedbc5-e161-4189-bb3c-2d1263a92d60" />
+<img width="1920" height="1020" alt="Screenshot 2026-05-30 214126" src="https://github.com/user-attachments/assets/5407d8a9-a51c-4915-a02d-702af3d24a20" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214150" src="https://github.com/user-attachments/assets/7a4600ac-6a02-4ee9-ab40-b53b1dcef1d1" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214202" src="https://github.com/user-attachments/assets/aa059ce5-f7bc-47f3-a97b-5f4ed6a44fd6" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214313" src="https://github.com/user-attachments/assets/de133c14-8603-4fec-848c-5421e5a11321" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214426" src="https://github.com/user-attachments/assets/48e43431-0b26-4e7e-a50c-a02e6efa3443" />
+<img width="1920" height="1020" alt="Screenshot 2026-05-30 214548" src="https://github.com/user-attachments/assets/dbe82345-4af7-4ac3-87c9-253cccf8210e" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214706" src="https://github.com/user-attachments/assets/0aec7909-b06e-4a44-8615-74495b309f23" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214731" src="https://github.com/user-attachments/assets/3cf88f24-d778-45b1-857a-ce6efc85b062" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214831" src="https://github.com/user-attachments/assets/3d7b3d44-9381-42f4-a148-6ebbcbc91228" />
+<img width="1920" height="1080" alt="Screenshot 2026-05-30 214925" src="https://github.com/user-attachments/assets/614d80cc-913f-4cae-a2f7-853cea8c5a61" />
+<img width="1874" height="978" alt="Screenshot 2026-05-30 225126" src="https://github.com/user-attachments/assets/bf9a0dc7-1494-4ba7-ab9d-d10265c3a64e" />
+
+---
+
 ## Full manual build procedure (Phases A–K)
 
 Total time: **25–35 minutes**. Same outcome as `deploy.ps1`.
