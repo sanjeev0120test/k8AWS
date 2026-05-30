@@ -311,7 +311,7 @@ GitHub Actions (`.github/workflows/ci.yaml`): `terraform fmt -check`, `terraform
 
 ---
 
-## Full manual build procedure (Phases A–K)
+## Full manual build procedure
 
 Total time: **25–35 minutes**. Same outcome as `deploy.ps1`.
 
