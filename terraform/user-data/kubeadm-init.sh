@@ -10,6 +10,15 @@ KUBE_PKG_VERSION="1.29.*"
 
 log() { echo "[$(date -Is)] $*"; }
 
+get_imds() {
+  local path="$1"
+  local imds_token
+  imds_token=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+  curl -sf -H "X-aws-ec2-metadata-token: $${imds_token}" \
+    "http://169.254.169.254/latest/meta-data/$${path}"
+}
+
 log "=== k8AWS kubeadm bootstrap starting ==="
 
 # --- Phase 1: OS prerequisites ---
@@ -33,10 +42,15 @@ net.ipv4.ip_forward                 = 1
 EOF
 sysctl --system
 
-# --- Phase 2: containerd (single CRI — no Docker, no CRI-O) ---
-log "Installing containerd..."
+# --- Phase 2: containerd (single CRI - no Docker, no CRI-O) ---
+log "Installing containerd and AWS CLI v2..."
 apt-get update -y
-apt-get install -y apt-transport-https ca-certificates curl gpg awscli jq
+apt-get install -y apt-transport-https ca-certificates curl gpg jq unzip
+
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --update
+rm -rf /tmp/aws /tmp/awscliv2.zip
 
 apt-get install -y containerd
 mkdir -p /etc/containerd
@@ -61,7 +75,7 @@ apt-mark hold kubelet kubeadm kubectl
 systemctl enable kubelet
 
 # --- Phase 4: kubeadm init ---
-PRIVATE_IP=$(curl -sf http://169.254.169.254/latest/meta-data/local-ipv4)
+PRIVATE_IP=$(get_imds "local-ipv4")
 log "Initializing kubeadm on $${PRIVATE_IP}..."
 
 kubeadm config images pull

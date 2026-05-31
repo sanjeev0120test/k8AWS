@@ -7,6 +7,7 @@ spec:
   provider: aws
   objectStorage:
     bucket: PLACEHOLDER_BUCKET
+    prefix: backups
   config:
     region: us-east-1
   default: true

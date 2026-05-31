@@ -11,12 +11,24 @@ $ProjectName = "k8AWS"
 $MetricsServerUrl = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.1/components.yaml"
 $NginxIngressUrl = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/baremetal/deploy.yaml"
 $EsoCrdsUrl = "https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.20/deploy/crds/bundle.yaml"
-$EsoManifestUrl = "https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.20/deploy/manifests/external-secrets.yaml"
+$EsoManifestUrl = "https://github.com/external-secrets/external-secrets/releases/download/v0.9.20/external-secrets.yaml"
 $CertManagerUrl = "https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml"
 $VeleroVersion = "v1.14.0"
 $VeleroPluginVersion = "v1.10.0"
 
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+
+function Sync-AwsCredentials {
+    # Clear stale exported env vars so AWS CLI uses the active `aws login` session.
+    Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+    $creds = aws configure export-credentials --format process 2>$null | ConvertFrom-Json
+    if (-not $creds.AccessKeyId) { throw "AWS credentials missing or expired - run: aws login" }
+    $env:AWS_ACCESS_KEY_ID = $creds.AccessKeyId
+    $env:AWS_SECRET_ACCESS_KEY = $creds.SecretAccessKey
+    if ($creds.SessionToken) { $env:AWS_SESSION_TOKEN = $creds.SessionToken } else { Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue }
+}
 
 function Get-TfOutput($name) {
     Push-Location $TerraformDir
@@ -24,6 +36,10 @@ function Get-TfOutput($name) {
 }
 
 function Invoke-Ssm($instanceId, [string]$cmd, [int]$timeout = 180) {
+    Sync-AwsCredentials
+    if ($cmd -match 'kubectl|velero') {
+        $cmd = "export KUBECONFIG=/etc/kubernetes/admin.conf; $cmd"
+    }
     & $SsmExec -InstanceId $instanceId -Region $Region -Command $cmd -TimeoutSeconds $timeout
 }
 
@@ -45,6 +61,7 @@ function Wait-SsmOnline($instanceId, [int]$maxMinutes = 20) {
     Write-Step "Waiting for SSM agent online..."
     $deadline = (Get-Date).AddMinutes($maxMinutes)
     do {
+        Sync-AwsCredentials
         $status = aws ssm describe-instance-information `
             --filters "Key=InstanceIds,Values=$instanceId" --region $Region `
             --query "InstanceInformationList[0].PingStatus" --output text 2>$null
@@ -58,13 +75,14 @@ function Wait-K8sReady($instanceId, [int]$maxMinutes = 30) {
     Write-Step "Waiting for kubeadm bootstrap..."
     $deadline = (Get-Date).AddMinutes($maxMinutes)
     do {
+        Sync-AwsCredentials
         try {
             $r = Invoke-Ssm $instanceId "test -f /var/lib/k8s-ready && echo READY || echo WAIT" 90
             if ($r.StandardOutputContent -match "READY") { return }
         } catch {}
         Start-Sleep -Seconds 30
     } while ((Get-Date) -lt $deadline)
-    throw "Bootstrap timeout — run .\scripts\logs.ps1"
+    throw "Bootstrap timeout - run .\scripts\logs.ps1"
 }
 
 function Sync-ManifestsToS3($bucket) {
@@ -85,6 +103,7 @@ Write-Step "k8AWS Production Deploy"
 if ($LASTEXITCODE -ne 0) { throw "Preflight failed" }
 
 Ensure-TerraformVars
+Sync-AwsCredentials
 
 Write-Step "Terraform apply"
 Push-Location $TerraformDir
@@ -109,7 +128,7 @@ if ($veleroBucket) { Sync-ManifestsToS3 $veleroBucket }
 
 Write-Step "Platform: metrics-server"
 Invoke-Ssm $instanceId "kubectl apply -f $MetricsServerUrl" 300
-Invoke-Ssm $instanceId "kubectl patch deployment metrics-server -n kube-system --type=json -p='[{ `"op`": `"add`", `"path`": `"/spec/template/spec/containers/0/args/-`", `"value`": `"--kubelet-insecure-tls`" }]'" 120
+Invoke-Ssm $instanceId 'printf %s "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]" > /tmp/ms-patch.json && kubectl patch deployment metrics-server -n kube-system --type=json --patch-file=/tmp/ms-patch.json' 120
 Invoke-Ssm $instanceId "kubectl rollout status deployment/metrics-server -n kube-system --timeout=240s" 240
 
 Write-Step "Platform: cert-manager"
@@ -124,17 +143,17 @@ Start-Sleep -Seconds 25
 if ($veleroBucket) {
     Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/nginx-ingress-nodeport.yaml")
 } else {
-    throw "Velero bucket required for manifest delivery — enable_velero_bucket must be true"
+    throw "Velero bucket required for manifest delivery - enable_velero_bucket must be true"
 }
 Invoke-Ssm $instanceId "kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=240s" 240
 
 Write-Step "Platform: External Secrets Operator"
 Invoke-Ssm $instanceId "kubectl apply -f $EsoCrdsUrl" 300
+Apply-ManifestsOnInstance $instanceId $veleroBucket @("namespace/platform-namespaces.yaml")
 Invoke-Ssm $instanceId "kubectl apply -f $EsoManifestUrl" 300
-Invoke-Ssm $instanceId "kubectl rollout status deployment/external-secrets -n external-secrets --timeout=240s" 240
+Invoke-Ssm $instanceId "kubectl rollout status deployment/external-secrets -n default --timeout=240s" 240
 
 $manifestSequence = @(
-    "namespace/platform-namespaces.yaml",
     "namespace/app-namespace.yaml",
     "policy/guardrails.yaml",
     "observability/alertmanager.yaml",
@@ -151,7 +170,7 @@ Apply-ManifestsOnInstance $instanceId $veleroBucket @(
     "security/cert-manager-issuer.yaml"
 )
 
-Write-Step "Network policies (before workloads — avoids restart surprises)"
+Write-Step "Network policies (before workloads - avoids restart surprises)"
 Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/networkpolicy.yaml")
 
 Write-Step "Database first (mongo before api)"
@@ -170,16 +189,17 @@ Invoke-Ssm $instanceId "kubectl rollout status deployment/webapp -n app --timeou
 Write-Step "Ingress rules"
 Apply-ManifestsOnInstance $instanceId $veleroBucket @("networking/ingress-rules.yaml")
 
-Write-Step "Velero backup (optional — continues on failure)"
+Write-Step "Velero backup (optional - continues on failure)"
 try {
     Invoke-Ssm $instanceId "curl -fsSL https://github.com/vmware-tanzu/velero/releases/download/$VeleroVersion/velero-${VeleroVersion}-linux-amd64.tar.gz | tar -xz && install velero-${VeleroVersion}-linux-amd64/velero /usr/local/bin/velero" 300
-    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --backup-location-config region=$Region --no-secret --wait" 600
+    Invoke-Ssm $instanceId "velero install --provider aws --plugins velero/velero-plugin-for-aws:${VeleroPluginVersion} --bucket $veleroBucket --backup-location-config region=$Region,prefix=backups --no-secret --wait" 600
+    Invoke-Ssm $instanceId 'printf %s "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/requests/cpu\",\"value\":\"100m\"}]" > /tmp/velero-cpu.json && kubectl patch deployment velero -n velero --type=json --patch-file=/tmp/velero-cpu.json' 120
     $veleroCfg = (Get-Content (Join-Path $ManifestsDir (Join-Path "backup" "velero-config.yaml")) -Raw).Replace("PLACEHOLDER_BUCKET", $veleroBucket)
     $veleroCfgTemp = Join-Path $env:TEMP "velero-config.yaml"
     $veleroCfg | Set-Content $veleroCfgTemp -Encoding UTF8
     aws s3 cp $veleroCfgTemp "s3://$veleroBucket/manifests/bootstrap/velero-config.yaml" --region $Region
     Invoke-Ssm $instanceId "aws s3 cp s3://$veleroBucket/manifests/bootstrap/velero-config.yaml /tmp/velero-config.yaml --region $Region && kubectl apply -f /tmp/velero-config.yaml" 120
-    Invoke-Ssm $instanceId "velero backup create app-manual-backup --include-namespaces app --wait" 300
+    Invoke-Ssm $instanceId "velero backup create app-manual-backup --include-namespaces app --snapshot-volumes=false --wait" 300
 } catch {
     Write-Host "Velero setup skipped or failed (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow
 }

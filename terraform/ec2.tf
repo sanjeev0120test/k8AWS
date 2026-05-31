@@ -15,7 +15,7 @@ data "aws_ami" "ubuntu" {
 
 resource "aws_security_group" "k8s_node" {
   name        = "${var.project_name}-k8s-sg"
-  description = "Security group for kubeadm node — SSM only, no SSH"
+  description = "Security group for kubeadm node - SSM only, no SSH"
   vpc_id      = aws_vpc.main.id
 
   # SSM agent needs outbound HTTPS

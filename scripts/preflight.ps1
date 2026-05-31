@@ -10,9 +10,9 @@ $ok = $true
 
 function Test-Check($name, $passed, $detail) {
     if ($passed) {
-        Write-Host "[PASS] $name — $detail" -ForegroundColor Green
+        Write-Host "[PASS] $name - $detail" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] $name — $detail" -ForegroundColor Red
+        Write-Host "[FAIL] $name - $detail" -ForegroundColor Red
         $script:ok = $false
     }
 }
@@ -57,8 +57,8 @@ try {
 }
 
 if (-not $ok) {
-    Write-Host "`nPreflight FAILED — fix issues above before deploy.ps1`n" -ForegroundColor Red
+    Write-Host "`nPreflight FAILED - fix issues above before deploy.ps1`n" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "`nPreflight PASSED — run .\scripts\deploy.ps1`n" -ForegroundColor Green
+Write-Host "`nPreflight PASSED - run .\scripts\deploy.ps1`n" -ForegroundColor Green

@@ -19,13 +19,16 @@ function Write-Check($num, $desc, $ok, $detail = "") {
     if ($ok) { $script:passed++ } else { $script:failed++ }
     $status = if ($ok) { "PASS" } else { "FAIL" }
     $color = if ($ok) { "Green" } else { "Red" }
-    $line = "[CHECK $num] $status — $desc"
+    $line = "[CHECK $num] $status - $desc"
     if ($detail) { $line += " | $detail" }
     Write-Host $line -ForegroundColor $color
     Add-Content -Path $LogFile -Value "$(Get-Date -Format o) $line"
 }
 
 function Invoke-SsmQuiet($instanceId, [string]$cmd) {
+    if ($cmd -match 'kubectl|velero') {
+        $cmd = "export KUBECONFIG=/etc/kubernetes/admin.conf; $cmd"
+    }
     try {
         $r = & $SsmExec -InstanceId $instanceId -Region $Region -Command $cmd -TimeoutSeconds 120
         return @{ Ok = $true; Out = $r.StandardOutputContent }
@@ -35,7 +38,7 @@ function Invoke-SsmQuiet($instanceId, [string]$cmd) {
 }
 
 "" | Set-Content $LogFile
-Write-Host "`nk8AWS Verification — 35 checks (production grade)`n" -ForegroundColor Cyan
+Write-Host "`nk8AWS Verification - 35 checks (production grade)`n" -ForegroundColor Cyan
 
 try {
     $id = aws sts get-caller-identity --region $Region --output json | ConvertFrom-Json
@@ -78,7 +81,7 @@ if ($instanceId) {
     Write-Check 11 "metrics-server Running" ($ms.Out -match "1/1")
     $ing = Invoke-SsmQuiet $instanceId "kubectl get deployment ingress-nginx-controller -n ingress-nginx --no-headers"
     Write-Check 12 "nginx-ingress Running" ($ing.Out -match "1/1")
-    $eso = Invoke-SsmQuiet $instanceId "kubectl get deployment external-secrets -n external-secrets --no-headers"
+    $eso = Invoke-SsmQuiet $instanceId "kubectl get deployment external-secrets -n default --no-headers"
     Write-Check 13 "External Secrets Running" ($eso.Out -match "1/1")
     $esMongo = Invoke-SsmQuiet $instanceId "kubectl get externalsecret mongo-credentials -n app --no-headers"
     $esGrafana = Invoke-SsmQuiet $instanceId "kubectl get externalsecret grafana-admin-credentials -n observability --no-headers"
@@ -110,9 +113,9 @@ if ($instanceId) {
     Write-Check 26 "HPA configured" ($hpa.Out -match "webapp")
     $top = Invoke-SsmQuiet $instanceId "kubectl top nodes"
     Write-Check 27 "kubectl top nodes" ($top.Out -match "cpu")
-    $velero = Invoke-SsmQuiet $instanceId "velero version 2>/dev/null | head -1"
+    $velero = Invoke-SsmQuiet $instanceId "velero version 2>/dev/null"
     $bsl = Invoke-SsmQuiet $instanceId "velero backup-location get 2>/dev/null | grep Available || true"
-    $veleroOk = ($velero.Out -match "velero") -and ($bsl.Out -match "Available")
+    $veleroOk = ($velero.Out -match "Version") -and ($bsl.Out -match "Available")
     Write-Check 28 "Velero installed with available backup location" $veleroOk "bsl=$($bsl.Out.Trim())"
 } else {
     5..28 | ForEach-Object { Write-Check $_ "Skipped (no instance)" $false }
