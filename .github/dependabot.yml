@@ -4,6 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 5
     groups:
       github_actions:
@@ -13,6 +19,12 @@ updates:
     directory: "/terraform"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 5
     groups:
       terraform:
