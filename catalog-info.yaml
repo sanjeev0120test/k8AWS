@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: k8aws
+  description: Platform component
+  annotations:
+    github.com/project-slug: sanjeev0120test/k8AWS
+spec:
+  type: service
+  lifecycle: production
+  owner: sanjeev0120test
