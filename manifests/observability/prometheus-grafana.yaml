@@ -108,6 +108,18 @@ spec:
           ports:
             - containerPort: 9090
               name: http
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             requests:
               cpu: 100m
@@ -215,6 +227,18 @@ spec:
               value: "false"
             - name: GF_AUTH_DISABLE_LOGIN_FORM
               value: "false"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
